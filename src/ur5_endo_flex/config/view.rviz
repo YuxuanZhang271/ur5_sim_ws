@@ -1,0 +1,346 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /RobotModel1
+        - /TF1
+        - /MarkerArray1
+        - /EndoscopeCamera1
+      Splitter Ratio: 0.5
+    Tree Height: 400
+  - Class: rviz_common/Views
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): end_cylinder
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base:
+          Value: false
+        base_link:
+          Value: false
+        base_link_inertia:
+          Value: false
+        camera_link:
+          Value: false
+        camera_optical_frame:
+          Value: false
+        end_cylinder:
+          Value: true
+        endoscope_base:
+          Value: false
+        endoscope_base_link:
+          Value: false
+        endoscope_link:
+          Value: false
+        endoscope_mount:
+          Value: false
+        endoscope_mount_link:
+          Value: false
+        endoscope_tip:
+          Value: false
+        endoscope_tip_link:
+          Value: false
+        ext_pitch_mid_1:
+          Value: false
+        ext_pitch_mid_2:
+          Value: false
+        ext_pitch_mid_3:
+          Value: false
+        ext_pitch_mid_4:
+          Value: false
+        ext_pitch_mid_5:
+          Value: false
+        ext_pitch_mid_6:
+          Value: false
+        ext_pitch_mid_7:
+          Value: false
+        ext_yaw_back_mid_1:
+          Value: false
+        ext_yaw_back_mid_2:
+          Value: false
+        ext_yaw_back_mid_3:
+          Value: false
+        ext_yaw_back_mid_4:
+          Value: false
+        ext_yaw_back_mid_5:
+          Value: false
+        ext_yaw_back_mid_6:
+          Value: false
+        ext_yaw_back_mid_7:
+          Value: false
+        ext_yaw_mid_1:
+          Value: false
+        ext_yaw_mid_2:
+          Value: false
+        ext_yaw_mid_3:
+          Value: false
+        ext_yaw_mid_4:
+          Value: false
+        ext_yaw_mid_5:
+          Value: false
+        ext_yaw_mid_6:
+          Value: false
+        ext_yaw_mid_7:
+          Value: false
+        flange:
+          Value: false
+        flex_base_link:
+          Value: false
+        forearm_link:
+          Value: false
+        ft_frame:
+          Value: false
+        rcm_link:
+          Value: false
+        segment_1:
+          Value: false
+        segment_2:
+          Value: false
+        segment_3:
+          Value: false
+        segment_4:
+          Value: false
+        segment_5:
+          Value: false
+        segment_6:
+          Value: false
+        segment_7:
+          Value: false
+        segment_8:
+          Value: false
+        shoulder_link:
+          Value: false
+        start_cylinder:
+          Value: false
+        supporter_link:
+          Value: false
+        tendon_0_end:
+          Value: false
+        tendon_0_s1:
+          Value: false
+        tendon_0_s2:
+          Value: false
+        tendon_0_s3:
+          Value: false
+        tendon_0_s4:
+          Value: false
+        tendon_0_s5:
+          Value: false
+        tendon_0_s6:
+          Value: false
+        tendon_0_s7:
+          Value: false
+        tendon_0_s8:
+          Value: false
+        tendon_180_end:
+          Value: false
+        tendon_180_s1:
+          Value: false
+        tendon_180_s2:
+          Value: false
+        tendon_180_s3:
+          Value: false
+        tendon_180_s4:
+          Value: false
+        tendon_180_s5:
+          Value: false
+        tendon_180_s6:
+          Value: false
+        tendon_180_s7:
+          Value: false
+        tendon_180_s8:
+          Value: false
+        tendon_270_end:
+          Value: false
+        tendon_270_s1:
+          Value: false
+        tendon_270_s2:
+          Value: false
+        tendon_270_s3:
+          Value: false
+        tendon_270_s4:
+          Value: false
+        tendon_270_s5:
+          Value: false
+        tendon_270_s6:
+          Value: false
+        tendon_270_s7:
+          Value: false
+        tendon_270_s8:
+          Value: false
+        tendon_90_end:
+          Value: false
+        tendon_90_s1:
+          Value: false
+        tendon_90_s2:
+          Value: false
+        tendon_90_s3:
+          Value: false
+        tendon_90_s4:
+          Value: false
+        tendon_90_s5:
+          Value: false
+        tendon_90_s6:
+          Value: false
+        tendon_90_s7:
+          Value: false
+        tendon_90_s8:
+          Value: false
+        tool0:
+          Value: false
+        upper_arm_link:
+          Value: false
+        world:
+          Value: false
+        wrist_1_link:
+          Value: false
+        wrist_2_link:
+          Value: false
+        wrist_3_link:
+          Value: false
+        yaw_base:
+          Value: false
+      Marker Alpha: 1
+      Marker Scale: 0.08
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Tree:
+        {}
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        axis_drift: true
+        endoscope_current_axis: true
+        endoscope_line: true
+        rcm_cone: true
+        rcm_point: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /endoscope_markers
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: EndoscopeCamera
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /endoscope_camera/image_raw
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.5
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.8
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.4
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 1.2
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1011
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: ""
+  Views:
+    collapsed: false
+  Width: 1854
+  X: 66
+  Y: 32

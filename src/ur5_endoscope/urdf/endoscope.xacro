@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <!-- Collision cylinder approx - take from bbox of the tube (mm to m) -->
+  <xacro:property name="scope_radius" value="0.045"/>   <!-- 45 mm  -->
+  <xacro:property name="scope_length" value="0.663"/>   <!-- 663 mm -->
+  <xacro:property name="scope_mass"   value="0.5"/>     <!-- kg     -->
+
+  <!-- Tube centre in STL frame (bbox mid-point), metres -->
+  <xacro:property name="tube_cx" value="-0.0193"/>
+  <xacro:property name="tube_cy" value="-0.01615"/>
+  <xacro:property name="tube_cz" value="-0.12955"/>
+
+  <link name="endoscope_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ur5_endoscope/meshes/endoscope_mid.stl"
+              scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="grey"><color rgba="0.5 0.5 0.5 1"/></material>
+    </visual>
+
+    <collision>
+      <!-- cylinder centred on its origin, aligned along +Z -->
+      <origin xyz="${tube_cx} ${tube_cy} ${tube_cz}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${scope_radius}" length="${scope_length}"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <mass value="${scope_mass}"/>
+      <origin xyz="${tube_cx} ${tube_cy} ${tube_cz}" rpy="0 0 0"/>
+      <inertia
+        ixx="${scope_mass*(3*scope_radius*scope_radius + scope_length*scope_length)/12}"
+        ixy="0" ixz="0"
+        iyy="${scope_mass*(3*scope_radius*scope_radius + scope_length*scope_length)/12}"
+        iyz="0"
+        izz="${scope_mass*scope_radius*scope_radius/2}"/>
+    </inertial>
+  </link>
+
+  <!-- <joint name="tool0_to_endoscope_joint" type="fixed">
+    <parent link="tool0"/>
+    <child  link="endoscope_link"/>
+    <origin xyz="0.09545 0 0.058" rpy="1.5708 -0.9547 -1.5708"/>
+  </joint> -->
+  <!--
+    The 45 deg yaw correction is applied about the UR5 tool0 origin
+    (the circle-flange centre, 0,0,0 in the tool0 frame) rather than
+    about the endoscope_link origin.
+
+        T_new = R_z(-45 deg) * T_old
+              = Translate(0.06749, -0.06749, 0.058) * R_rpy(1.5708, -0.9547, -2.3562)
+
+    The endoscope final orientation in the tool0 frame is identical to
+    before; only the translation of the endoscope_link origin changes.
+    NOTE this comment uses no colons on purpose.  In ROS 2 Jazzy the
+    xacro output is passed as a parameter and gets parsed as YAML,
+    and any bare colon (e.g. "Mathematically") in the URDF text would
+    break the launch.  Double hyphens are also avoided because XML
+    forbids them inside an XML comment.
+  -->
+  <joint name="tool0_to_endoscope_joint" type="fixed">
+    <parent link="tool0"/>
+    <child  link="endoscope_link"/>
+    <origin xyz="0.06749 -0.06749 0.058" rpy="1.5708 -0.9547 -2.3562"/>
+  </joint>
+</robot>

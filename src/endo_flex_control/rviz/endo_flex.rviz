@@ -1,0 +1,184 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /RobotModel1
+        - /TF1
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Description Topic:
+        Value: /robot_description
+      Enabled: true
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Arrows: true
+      Show Axes: true
+      Marker Scale: 0.05
+      Update Interval: 0
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: false
+        start_cylinder:
+          Value: true
+        yaw_base:
+          Value: false
+        segment_1:
+          Value: true
+        segment_2:
+          Value: true
+        segment_3:
+          Value: true
+        segment_4:
+          Value: true
+        segment_5:
+          Value: true
+        segment_6:
+          Value: true
+        segment_7:
+          Value: true
+        segment_8:
+          Value: true
+        end_cylinder:
+          Value: true
+        # --- hidden intermediate frames ---
+        ext_yaw_mid_1:
+          Value: false
+        ext_yaw_mid_2:
+          Value: false
+        ext_yaw_mid_3:
+          Value: false
+        ext_yaw_mid_4:
+          Value: false
+        ext_yaw_mid_5:
+          Value: false
+        ext_yaw_mid_6:
+          Value: false
+        ext_yaw_mid_7:
+          Value: false
+        ext_pitch_mid_1:
+          Value: false
+        ext_pitch_mid_2:
+          Value: false
+        ext_pitch_mid_3:
+          Value: false
+        ext_pitch_mid_4:
+          Value: false
+        ext_pitch_mid_5:
+          Value: false
+        ext_pitch_mid_6:
+          Value: false
+        ext_pitch_mid_7:
+          Value: false
+        ext_yaw_back_mid_1:
+          Value: false
+        ext_yaw_back_mid_2:
+          Value: false
+        ext_yaw_back_mid_3:
+          Value: false
+        ext_yaw_back_mid_4:
+          Value: false
+        ext_yaw_back_mid_5:
+          Value: false
+        ext_yaw_back_mid_6:
+          Value: false
+        ext_yaw_back_mid_7:
+          Value: false
+        # --- tendon frames (all disabled) ---
+        tendon_0_end:
+          Value: false
+        tendon_0_s1:
+          Value: false
+        tendon_0_s2:
+          Value: false
+        tendon_0_s3:
+          Value: false
+        tendon_0_s4:
+          Value: false
+        tendon_0_s5:
+          Value: false
+        tendon_0_s6:
+          Value: false
+        tendon_0_s7:
+          Value: false
+        tendon_0_s8:
+          Value: false
+        tendon_90_end:
+          Value: false
+        tendon_90_s1:
+          Value: false
+        tendon_90_s2:
+          Value: false
+        tendon_90_s3:
+          Value: false
+        tendon_90_s4:
+          Value: false
+        tendon_90_s5:
+          Value: false
+        tendon_90_s6:
+          Value: false
+        tendon_90_s7:
+          Value: false
+        tendon_90_s8:
+          Value: false
+        tendon_180_end:
+          Value: false
+        tendon_180_s1:
+          Value: false
+        tendon_180_s2:
+          Value: false
+        tendon_180_s3:
+          Value: false
+        tendon_180_s4:
+          Value: false
+        tendon_180_s5:
+          Value: false
+        tendon_180_s6:
+          Value: false
+        tendon_180_s7:
+          Value: false
+        tendon_180_s8:
+          Value: false
+        tendon_270_end:
+          Value: false
+        tendon_270_s1:
+          Value: false
+        tendon_270_s2:
+          Value: false
+        tendon_270_s3:
+          Value: false
+        tendon_270_s4:
+          Value: false
+        tendon_270_s5:
+          Value: false
+        tendon_270_s6:
+          Value: false
+        tendon_270_s7:
+          Value: false
+        tendon_270_s8:
+          Value: false
+  Global Options:
+    Fixed Frame: base_link
+    Background Color: 48; 48; 48
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+Window Geometry:
+  Height: 900
+  Width: 1400
+  Displays:
+    collapsed: false

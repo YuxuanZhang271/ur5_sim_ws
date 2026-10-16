@@ -1,0 +1,9 @@
+[submodule "src/Universal_Robots_ROS2_Description"]
+	path = src/Universal_Robots_ROS2_Description
+	url = https://github.com/UniversalRobots/Universal_Robots_ROS2_Description.git
+[submodule "src/Universal_Robots_ROS2_GZ_Simulation"]
+	path = src/Universal_Robots_ROS2_GZ_Simulation
+	url = https://github.com/UniversalRobots/Universal_Robots_ROS2_GZ_Simulation.git
+[submodule "src/kdl_parser_py"]
+	path = src/kdl_parser_py
+	url = https://github.com/ros/kdl_parser_py.git

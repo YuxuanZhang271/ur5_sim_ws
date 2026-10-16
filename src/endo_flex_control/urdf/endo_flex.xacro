@@ -1,0 +1,230 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="endoscope">
+
+  <!-- ============ Parameters ============ -->
+  <xacro:arg name="show_tube" default="false"/>
+  <xacro:property name="SHOW_TUBE" value="$(arg show_tube)"/>
+
+  <xacro:property name="N"           value="8"/>
+  <xacro:property name="SEG_LEN"     value="0.008"/>
+  <xacro:property name="SEG_RADIUS"  value="0.0015"/>
+  <xacro:property name="CYL_RADIUS"  value="0.005"/>
+  <xacro:property name="CYL_LEN"     value="0.005"/>
+  <xacro:property name="MAX_BEND"    value="1.57079632679"/>
+  <xacro:property name="PER_BEND_MAX" value="${MAX_BEND/(N-1)}"/>
+
+  <xacro:property name="TENDON_R"     value="0.004"/>
+  <xacro:property name="TENDON_VIS_R" value="0.0008"/>
+
+  <!-- ============ Materials (global) ============ -->
+  <material name="blue"><color rgba="0.0 0.0 1.0 1.0"/></material>
+  <material name="red" ><color rgba="1.0 0.0 0.0 1.0"/></material>
+  <material name="tendon_red"   ><color rgba="1.0 0.0 0.0 1.0"/></material>
+  <material name="tendon_green" ><color rgba="0.0 1.0 0.0 1.0"/></material>
+  <material name="tendon_blue"  ><color rgba="0.0 0.0 1.0 1.0"/></material>
+  <material name="tendon_yellow"><color rgba="1.0 1.0 0.0 1.0"/></material>
+
+  <!-- ================================================================
+       Tendon markers as SEPARATE LINKS.
+       ================================================================ -->
+  <xacro:macro name="tendon_marker_link" params="parent_link x_off y_off z_off tag name material_name">
+    <link name="tendon_${name}_${tag}">
+      <visual>
+        <geometry><sphere radius="${TENDON_VIS_R}"/></geometry>
+        <material name="${material_name}"/>
+      </visual>
+      <inertial>
+        <mass value="1e-9"/>
+        <inertia ixx="1e-15" ixy="0" ixz="0" iyy="1e-15" iyz="0" izz="1e-15"/>
+      </inertial>
+    </link>
+    <joint name="tendon_${name}_${tag}_joint" type="fixed">
+      <parent link="${parent_link}"/>
+      <child link="tendon_${name}_${tag}"/>
+      <origin xyz="${x_off} ${y_off} ${z_off}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ================================================================
+       Optional blue tube visual (toggled by show_tube arg)
+       ================================================================ -->
+  <xacro:macro name="segment_tube_visual">
+    <xacro:if value="$(arg show_tube)">
+      <visual>
+        <origin xyz="0 0 ${SEG_LEN/2}"/>
+        <geometry><cylinder radius="${SEG_RADIUS}" length="${SEG_LEN}"/></geometry>
+        <material name="blue"/>
+      </visual>
+    </xacro:if>
+  </xacro:macro>
+
+  <!-- ============ Root ============ -->
+  <link name="base_link"/>
+
+  <joint name="base_fixed" type="fixed">
+    <parent link="base_link"/>
+    <child link="start_cylinder"/>
+  </joint>
+
+  <link name="start_cylinder">
+    <visual>
+      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.001"/>
+      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9"/>
+    </inertial>
+  </link>
+
+  <joint name="base_yaw" type="revolute">
+    <parent link="start_cylinder"/>
+    <child link="yaw_base"/>
+    <origin xyz="0 0 ${CYL_LEN/2}" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+  </joint>
+
+  <link name="yaw_base">
+    <inertial>
+      <mass value="1e-6"/>
+      <inertia ixx="1e-12" ixy="0" ixz="0" iyy="1e-12" iyz="0" izz="1e-12"/>
+    </inertial>
+  </link>
+
+  <joint name="seg1_fixed" type="fixed">
+    <parent link="yaw_base"/>
+    <child link="segment_1"/>
+  </joint>
+
+  <!-- Segment 1 -->
+  <link name="segment_1">
+    <xacro:segment_tube_visual/>
+    <collision>
+      <origin xyz="0 0 ${SEG_LEN/2}"/>
+      <geometry><cylinder radius="${SEG_RADIUS}" length="${SEG_LEN}"/></geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 ${SEG_LEN/2}"/>
+      <mass value="0.0001"/>
+      <inertia ixx="1e-10" ixy="0" ixz="0" iyy="1e-10" iyz="0" izz="1e-10"/>
+    </inertial>
+  </link>
+
+  <xacro:tendon_marker_link parent_link="segment_1" x_off="${ TENDON_R}" y_off="0"             z_off="${SEG_LEN/2}" tag="s1" name="0"   material_name="tendon_red"/>
+  <xacro:tendon_marker_link parent_link="segment_1" x_off="0"             y_off="${ TENDON_R}" z_off="${SEG_LEN/2}" tag="s1" name="90"  material_name="tendon_green"/>
+  <xacro:tendon_marker_link parent_link="segment_1" x_off="${-TENDON_R}" y_off="0"             z_off="${SEG_LEN/2}" tag="s1" name="180" material_name="tendon_blue"/>
+  <xacro:tendon_marker_link parent_link="segment_1" x_off="0"             y_off="${-TENDON_R}" z_off="${SEG_LEN/2}" tag="s1" name="270" material_name="tendon_yellow"/>
+
+  <!-- ================================================================
+       Segment transition
+       ================================================================ -->
+  <xacro:macro name="seg_joint" params="idx parent origin_z">
+
+    <joint name="ext_yaw_${idx}" type="revolute">
+      <parent link="${parent}"/>
+      <child link="ext_yaw_mid_${idx}"/>
+      <origin xyz="0 0 ${origin_z}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+    </joint>
+    <link name="ext_yaw_mid_${idx}">
+      <inertial>
+        <mass value="1e-6"/>
+        <inertia ixx="1e-12" ixy="0" ixz="0" iyy="1e-12" iyz="0" izz="1e-12"/>
+      </inertial>
+    </link>
+
+    <joint name="ext_pitch_${idx}" type="revolute">
+      <parent link="ext_yaw_mid_${idx}"/>
+      <child link="ext_pitch_mid_${idx}"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="100" velocity="10" lower="-${PER_BEND_MAX}" upper="${PER_BEND_MAX}"/>
+    </joint>
+    <link name="ext_pitch_mid_${idx}">
+      <inertial>
+        <mass value="1e-6"/>
+        <inertia ixx="1e-12" ixy="0" ixz="0" iyy="1e-12" iyz="0" izz="1e-12"/>
+      </inertial>
+    </link>
+
+    <joint name="ext_yaw_back_${idx}" type="revolute">
+      <parent link="ext_pitch_mid_${idx}"/>
+      <child link="ext_yaw_back_mid_${idx}"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+    </joint>
+    <link name="ext_yaw_back_mid_${idx}">
+      <inertial>
+        <mass value="1e-6"/>
+        <inertia ixx="1e-12" ixy="0" ixz="0" iyy="1e-12" iyz="0" izz="1e-12"/>
+      </inertial>
+    </link>
+
+    <joint name="extension_${idx}" type="prismatic">
+      <parent link="ext_yaw_back_mid_${idx}"/>
+      <child link="segment_${idx+1}"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit effort="100" velocity="1.0" lower="0" upper="${SEG_LEN}"/>
+    </joint>
+
+    <link name="segment_${idx+1}">
+      <xacro:segment_tube_visual/>
+      <collision>
+        <origin xyz="0 0 ${SEG_LEN/2}"/>
+        <geometry><cylinder radius="${SEG_RADIUS}" length="${SEG_LEN}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 ${SEG_LEN/2}"/>
+        <mass value="0.0001"/>
+        <inertia ixx="1e-10" ixy="0" ixz="0" iyy="1e-10" iyz="0" izz="1e-10"/>
+      </inertial>
+    </link>
+
+    <xacro:tendon_marker_link parent_link="segment_${idx+1}" x_off="${ TENDON_R}" y_off="0"             z_off="${SEG_LEN/2}" tag="s${idx+1}" name="0"   material_name="tendon_red"/>
+    <xacro:tendon_marker_link parent_link="segment_${idx+1}" x_off="0"             y_off="${ TENDON_R}" z_off="${SEG_LEN/2}" tag="s${idx+1}" name="90"  material_name="tendon_green"/>
+    <xacro:tendon_marker_link parent_link="segment_${idx+1}" x_off="${-TENDON_R}" y_off="0"             z_off="${SEG_LEN/2}" tag="s${idx+1}" name="180" material_name="tendon_blue"/>
+    <xacro:tendon_marker_link parent_link="segment_${idx+1}" x_off="0"             y_off="${-TENDON_R}" z_off="${SEG_LEN/2}" tag="s${idx+1}" name="270" material_name="tendon_yellow"/>
+
+  </xacro:macro>
+
+  <xacro:seg_joint idx="1" parent="segment_1" origin_z="${SEG_LEN}"/>
+  <xacro:seg_joint idx="2" parent="segment_2" origin_z="0"/>
+  <xacro:seg_joint idx="3" parent="segment_3" origin_z="0"/>
+  <xacro:seg_joint idx="4" parent="segment_4" origin_z="0"/>
+  <xacro:seg_joint idx="5" parent="segment_5" origin_z="0"/>
+  <xacro:seg_joint idx="6" parent="segment_6" origin_z="0"/>
+  <xacro:seg_joint idx="7" parent="segment_7" origin_z="0"/>
+
+  <joint name="end_fixed" type="fixed">
+    <parent link="segment_8"/>
+    <child link="end_cylinder"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="end_cylinder">
+    <visual>
+      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
+      <material name="red"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.001"/>
+      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9"/>
+    </inertial>
+  </link>
+
+  <xacro:tendon_marker_link parent_link="end_cylinder" x_off="${ TENDON_R}" y_off="0"             z_off="0" tag="end" name="0"   material_name="tendon_red"/>
+  <xacro:tendon_marker_link parent_link="end_cylinder" x_off="0"             y_off="${ TENDON_R}" z_off="0" tag="end" name="90"  material_name="tendon_green"/>
+  <xacro:tendon_marker_link parent_link="end_cylinder" x_off="${-TENDON_R}" y_off="0"             z_off="0" tag="end" name="180" material_name="tendon_blue"/>
+  <xacro:tendon_marker_link parent_link="end_cylinder" x_off="0"             y_off="${-TENDON_R}" z_off="0" tag="end" name="270" material_name="tendon_yellow"/>
+
+</robot>

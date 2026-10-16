@@ -1,0 +1,165 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur5_endo_flex">
+  <xacro:arg name="name"      default="ur"/>
+  <xacro:arg name="ur_type"   default="ur5"/>
+  <xacro:arg name="tf_prefix" default=""/>
+
+  <xacro:arg name="joint_limit_params" default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
+  <xacro:arg name="kinematics_params"  default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
+  <xacro:arg name="physical_params"    default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>
+  <xacro:arg name="visual_params"      default="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"/>
+  <xacro:arg name="safety_limits"      default="false"/>
+  <xacro:arg name="safety_pos_margin"  default="0.15"/>
+  <xacro:arg name="safety_k_position"  default="20"/>
+  <xacro:arg name="force_abs_paths"    default="false"/>
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+
+  <!-- ============================================================= -->
+  <!-- World                                                         -->
+  <!-- ============================================================= -->
+  <link name="world"/>
+
+  <!-- ============================================================= -->
+  <!-- Supporter - 0.80 m tall cylinder the robot rests on           -->
+  <!-- Link origin = BOTTOM of the cylinder (ground contact point)   -->
+  <!-- ============================================================= -->
+  <xacro:property name="supporter_radius" value="0.10"/>
+  <xacro:property name="supporter_height" value="0.80"/>
+  <xacro:property name="supporter_mass"   value="15.0"/>
+
+  <link name="supporter_link">
+    <visual>
+      <origin xyz="0 0 ${supporter_height/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${supporter_radius}"
+                  length="${supporter_height}"/>
+      </geometry>
+      <material name="supporter_grey">
+        <color rgba="0.45 0.45 0.45 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 ${supporter_height/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${supporter_radius}"
+                  length="${supporter_height}"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <mass value="${supporter_mass}"/>
+      <origin xyz="0 0 ${supporter_height/2}" rpy="0 0 0"/>
+      <inertia
+        ixx="${supporter_mass*(3*supporter_radius*supporter_radius + supporter_height*supporter_height)/12}"
+        ixy="0" ixz="0"
+        iyy="${supporter_mass*(3*supporter_radius*supporter_radius + supporter_height*supporter_height)/12}"
+        iyz="0"
+        izz="${supporter_mass*supporter_radius*supporter_radius/2}"/>
+    </inertial>
+  </link>
+
+  <joint name="world_to_supporter_joint" type="fixed">
+    <parent link="world"/>
+    <child  link="supporter_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================= -->
+  <!-- UR5 base mounted on the TOP face of the supporter             -->
+  <!-- ============================================================= -->
+  <xacro:ur_robot
+    name="$(arg name)"
+    tf_prefix="$(arg tf_prefix)"
+    parent="supporter_link"
+    joint_limits_parameters_file="$(arg joint_limit_params)"
+    kinematics_parameters_file="$(arg kinematics_params)"
+    physical_parameters_file="$(arg physical_params)"
+    visual_parameters_file="$(arg visual_params)"
+    safety_limits="$(arg safety_limits)"
+    safety_pos_margin="$(arg safety_pos_margin)"
+    safety_k_position="$(arg safety_k_position)"
+    force_abs_paths="$(arg force_abs_paths)">
+    <origin xyz="0 0 ${supporter_height}" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- attach the endoscope -->
+  <xacro:include filename="$(find ur5_endoscope)/urdf/endoscope.xacro"/>
+
+  <!-- ============================================================= -->
+  <!-- Make the supporter static in Gazebo (prevents any drift)      -->
+  <!-- ============================================================= -->
+  <gazebo reference="supporter_link">
+    <static>true</static>
+  </gazebo>
+
+  <!-- ============================================================= -->
+  <!-- ros2_control hardware interface for Gazebo                    -->
+  <!-- (UR joints only - the endo-flex continuum joints are NOT      -->
+  <!--  actuated through this interface.)                            -->
+  <!-- ============================================================= -->
+  <ros2_control name="ur5_with_endoscope" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <joint name="shoulder_pan_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="shoulder_lift_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="elbow_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_1_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_2_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="wrist_3_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <!-- ============================================================= -->
+  <!-- Gazebo Sim plugin that loads gz_ros2_control + controllers    -->
+  <!-- position_proportional_gain default 0.1 is too low for a UR5;  -->
+  <!-- 1.0 is a typical, stable value.                               -->
+  <!-- ============================================================= -->
+  <gazebo>
+    <plugin filename="gz_ros2_control-system"
+            name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find ur_simulation_gz)/config/ur_controllers.yaml</parameters>
+      <position_proportional_gain>1.0</position_proportional_gain>
+    </plugin>
+  </gazebo>
+
+  <!-- ============================================================= -->
+  <!-- Endo-flex continuum - attached as a child of endoscope_link   -->
+  <!-- ============================================================= -->
+  <xacro:include filename="$(find ur5_endo_flex)/urdf/endo_flex_flexbase.xacro"/>
+
+  <!-- Mount joint endoscope_link to flex_base_link
+       origin xyz 0 0 -0.398 m  rpy 3.141593 0 0.616096 rad
+       computed so flex z is minus endoscope z, flex x is tool0 z -->
+  <joint name="endoscope_to_flex_joint" type="fixed">
+    <parent link="endoscope_link"/>
+    <child  link="flex_base_link"/>
+    <origin xyz="0 0 -0.398" rpy="3.141593 0 0.616096"/>
+  </joint>
+</robot>

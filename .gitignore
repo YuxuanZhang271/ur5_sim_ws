@@ -1,0 +1,29 @@
+# ROS build artifacts
+build/
+devel/
+install/
+logs/
+log/
+*.bag
+*.pcd
+*.ply
+*.mp4
+*.avi
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+output.log
+
+# Model files
+*.stl
