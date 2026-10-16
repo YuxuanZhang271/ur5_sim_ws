@@ -2,11 +2,11 @@
 """
 control_panel_gui.py — Compact Tkinter control panel for ur5_endo_flex.
 
-Compact Layout (~560x400 default, expandable):
-    Row 0:  Top toolbar (HOME, RESET, BIRD-EYE, PULL OUT, and collapsible ? Keytips toggle)
-    Row 1:  Arm state (3x2 joint grid + RCM status) | Arm controls (mode toggle + D-pad)
-    Row 2:  Flex state (3x2 param grid + tendons)   | Flex controls (mode toggle + WASD)
-    Row 3:  Collapsible Keytips cheat-sheet (hidden by default; toggled via '? Keys')
+Compact Layout (~580x455 default, expandable):
+    Row 0:  Top toolbar (HOME, RESET, BIRD-EYE, PULL OUT)
+    Row 1:  Arm state (3x2 joint grid + RCM status) | Arm controls (mode toggle + 2x4 D-pad)
+    Row 2:  Flex state (3x2 param grid + tendons)   | Flex controls (mode toggle + 2x4 WASD + R/F)
+    Row 3:  Permanent Keyboard Shortcuts panel at the bottom
 """
 
 import threading
@@ -25,27 +25,26 @@ class FlexGridGUI:
         self.node = node
         self.root = tk.Tk()
         self.root.title('ur5_endo_flex — control panel')
-        self.root.geometry('580x395')
-        self.root.minsize(520, 360)
+        self.root.geometry('580x455')
+        self.root.minsize(520, 420)
 
         # 2 columns: State (col 0) | Controls (col 1)
         self.root.columnconfigure(0, weight=3)
         self.root.columnconfigure(1, weight=2)
 
-        # Row 0 (toolbar) and Row 3 (optional keytips) take minimum height;
-        # Rows 1 (Arm) and 2 (Flex) share vertical space.
+        # Row 0 (toolbar) and Row 3 (keytips) take minimum height;
+        # Rows 1 (Arm) and 2 (Flex) share equal vertical space.
         self.root.rowconfigure(0, weight=0)
-        self.root.rowconfigure(1, weight=1)
-        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(1, weight=1, uniform='section_row')
+        self.root.rowconfigure(2, weight=1, uniform='section_row')
         self.root.rowconfigure(3, weight=0)
 
         self._button_pressed = set()
-        self._keys_visible = False
 
         self._build_toolbar()
         self._build_arm_row()
         self._build_flex_row()
-        self._build_keytips_drawer()
+        self._build_keytips()
 
         # Root-level ButtonRelease clears orphaned presses.
         self.root.bind('<ButtonRelease-1>',
@@ -86,14 +85,13 @@ class FlexGridGUI:
             self.node.set_key(key, False)
 
     # ------------------------------------------------------------------
-    # Row 0: Compact Top Toolbar (Semi-auto commands + Keytips toggle)
+    # Row 0: Compact Top Toolbar (Semi-auto commands)
     # ------------------------------------------------------------------
     def _build_toolbar(self):
         bar = ttk.Frame(self.root, padding=(4, 4, 4, 0))
         bar.grid(row=0, column=0, columnspan=2, sticky='ew')
         for c in range(4):
             bar.columnconfigure(c, weight=1)
-        bar.columnconfigure(4, weight=0)
 
         ttk.Button(bar, text='HOME (Ctrl+H)',
                    command=self.node.cmd_home).grid(
@@ -108,13 +106,8 @@ class FlexGridGUI:
                    command=self.node.cmd_pull_out).grid(
             row=0, column=3, padx=2, sticky='ew')
 
-        self.keys_btn_var = tk.StringVar(value='? Keys \u25bc')
-        ttk.Button(bar, textvariable=self.keys_btn_var, width=9,
-                   command=self._toggle_keytips).grid(
-            row=0, column=4, padx=(6, 2))
-
     # ------------------------------------------------------------------
-    # Row 1: Arm section (State in 3x2 grid | Controls)
+    # Row 1: Arm section (State in 3x2 grid | Controls in 2x4 grid)
     # ------------------------------------------------------------------
     def _build_arm_row(self):
         # ---- Col 0: Arm state ----
@@ -185,7 +178,7 @@ class FlexGridGUI:
             self._bind_press_hold(b, key)
 
     # ------------------------------------------------------------------
-    # Row 2: Flex section (State in 3x2 grid + tendons | Controls)
+    # Row 2: Flex section (State in 3x2 grid + tendons | Controls in 2x4 grid)
     # ------------------------------------------------------------------
     def _build_flex_row(self):
         # ---- Col 0: Flex state ----
@@ -234,7 +227,7 @@ class FlexGridGUI:
         ttk.Label(tf, textvariable=self.tendon_dL_var,
                   font=('Consolas', 8)).pack(anchor='w')
 
-        # ---- Col 1: Flex controls ----
+        # ---- Col 1: Flex controls (2x4 grid: WASD + R/F) ----
         f2 = self._labeled_frame(self.root, 'Flex controls')
         f2.grid(row=2, column=1, sticky='nsew', padx=(2, 4), pady=3)
         f2.columnconfigure(0, weight=1)
@@ -247,7 +240,7 @@ class FlexGridGUI:
 
         gf = ttk.Frame(f2)
         gf.grid(row=1, column=0, sticky='nsew')
-        for c in range(3):
+        for c in range(4):
             gf.columnconfigure(c, weight=1, uniform='flex_btn')
         for r in range(2):
             gf.rowconfigure(r, weight=1, uniform='flex_row')
@@ -257,16 +250,20 @@ class FlexGridGUI:
             ('A', 1, 0, 'flex_a'),
             ('S', 1, 1, 'flex_s'),
             ('D', 1, 2, 'flex_d'),
+            ('R', 0, 3, 'flex_r'),
+            ('F', 1, 3, 'flex_f'),
         ]:
             b = ttk.Button(gf, text=text, width=5)
             b.grid(row=r, column=c, padx=2, pady=2, sticky='nsew')
             self._bind_press_hold(b, key)
 
     # ------------------------------------------------------------------
-    # Row 3: Collapsible Keytips Drawer (hidden by default)
+    # Row 3: Permanent Keyboard Shortcuts Panel at Bottom
     # ------------------------------------------------------------------
-    def _build_keytips_drawer(self):
+    def _build_keytips(self):
         self.keytips_frame = self._labeled_frame(self.root, 'Keyboard Shortcuts')
+        self.keytips_frame.grid(
+            row=3, column=0, columnspan=2, sticky='ew', padx=4, pady=(0, 4))
         self.keytips_frame.columnconfigure(0, weight=1)
         self.keytips_frame.columnconfigure(1, weight=1)
 
@@ -282,22 +279,10 @@ class FlexGridGUI:
         ttk.Label(
             self.keytips_frame, justify='left', font=('Consolas', 8),
             text=(
-                "Flex : W straighten | S bend | A/D steer yaw (y-axis auto-horizon)\n"
+                "Flex : W/S straighten/bend | A/D yaw | R/F ext len\n"
                 "Auto : Ctrl+H HOME | Ctrl+R RESET | Ctrl+B BIRD-EYE | Ctrl+P PULL OUT"
             )
         ).grid(row=0, column=1, sticky='nw', padx=4)
-
-    def _toggle_keytips(self):
-        self._keys_visible = not self._keys_visible
-        if self._keys_visible:
-            self.keytips_frame.grid(
-                row=3, column=0, columnspan=2, sticky='ew', padx=4, pady=(0, 4))
-            self.keys_btn_var.set('? Keys \u25b2')
-            self.root.geometry('580x475')
-        else:
-            self.keytips_frame.grid_remove()
-            self.keys_btn_var.set('? Keys \u25bc')
-            self.root.geometry('580x395')
 
     # ------------------------------------------------------------------
     # Periodic UI refresh
