@@ -8,6 +8,9 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# URI-only shim so gz-sim can resolve model://ur5_endoscope/...
+install(FILES model.config DESTINATION share/${PROJECT_NAME})
+
 install(
   PROGRAMS scripts/control_panel.py
          scripts/initial_pose_publisher.py

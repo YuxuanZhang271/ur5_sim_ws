@@ -1,12 +1,13 @@
 # ur5_sim.launch.py
 #
 # Unified Gazebo simulation + ros2_control + RViz + Tkinter control panel
-# + ros_gz_bridge for the distal endoscope camera at end_cylinder.
+# + ros_gz_bridge for the distal endoscope camera at end_cylinder and
+# the endo_flex Gazebo joint position controllers.
 # No MoveIt, no motion planning plugin.
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -17,6 +18,20 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     ur_sim_gz_share = get_package_share_directory('ur_simulation_gz')
     ur5_endo_flex_share = get_package_share_directory('ur5_endo_flex')
+
+    # gz-sim resolves model:// URIs by walking GZ_SIM_RESOURCE_PATH for a
+    # directory named after the "package" that contains a model.config shim.
+    # Register both mesh packages; include each share dir and its parent so
+    # the entry works for both isolated and merged colcon install layouts.
+    ur_description_share = get_package_share_directory('ur_description')
+    ur5_endoscope_share = get_package_share_directory('ur5_endoscope')
+    gz_resource_path = ':'.join(filter(None, [
+        os.path.dirname(ur_description_share),
+        ur_description_share,
+        os.path.dirname(ur5_endoscope_share),
+        ur5_endoscope_share,
+        os.environ.get('GZ_SIM_RESOURCE_PATH', ''),
+    ]))
 
     description_file = os.path.join(
         ur5_endo_flex_share, 'urdf', 'ur5_endo_flex.urdf.xacro')
@@ -48,7 +63,9 @@ def generate_launch_description():
     )
 
     # Bridge Gazebo's endoscope camera topics (/endoscope_camera/image_raw and
-    # /endoscope_camera/camera_info) to ROS 2 sensor_msgs.
+    # /endoscope_camera/camera_info) to ROS 2 sensor_msgs, AND bridge the 4
+    # endo_flex JointPositionController command topics from ROS 2 to Gazebo so
+    # Gazebo physically rotates and bends the continuum joints with end_cylinder.
     camera_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -58,6 +75,10 @@ def generate_launch_description():
         arguments=[
             '/endoscope_camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
             '/endoscope_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+            '/flex/base_yaw@std_msgs/msg/Float64]gz.msgs.Double',
+            '/flex/ext_yaw@std_msgs/msg/Float64]gz.msgs.Double',
+            '/flex/ext_pitch@std_msgs/msg/Float64]gz.msgs.Double',
+            '/flex/ext_yaw_back@std_msgs/msg/Float64]gz.msgs.Double',
         ],
     )
 
@@ -135,6 +156,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        SetEnvironmentVariable(name='GZ_SIM_RESOURCE_PATH', value=gz_resource_path),
         launch_gui_arg,
         sim,
         camera_bridge,

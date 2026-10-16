@@ -2,8 +2,8 @@
 """
 control_panel_gui.py — Compact Tkinter control panel for ur5_endo_flex.
 
-Compact Layout (~520x400 default, expandable):
-    Row 0:  Top toolbar (HOME, RESET, PULL OUT, and collapsible ? Keytips toggle)
+Compact Layout (~560x400 default, expandable):
+    Row 0:  Top toolbar (HOME, RESET, BIRD-EYE, PULL OUT, and collapsible ? Keytips toggle)
     Row 1:  Arm state (3x2 joint grid + RCM status) | Arm controls (mode toggle + D-pad)
     Row 2:  Flex state (3x2 param grid + tendons)   | Flex controls (mode toggle + WASD)
     Row 3:  Collapsible Keytips cheat-sheet (hidden by default; toggled via '? Keys')
@@ -25,16 +25,15 @@ class FlexGridGUI:
         self.node = node
         self.root = tk.Tk()
         self.root.title('ur5_endo_flex — control panel')
-        # Compact footprint (roughly 1/3 the area of the old 960x880 window)
-        self.root.geometry('530x395')
-        self.root.minsize(480, 360)
+        self.root.geometry('580x395')
+        self.root.minsize(520, 360)
 
         # 2 columns: State (col 0) | Controls (col 1)
         self.root.columnconfigure(0, weight=3)
         self.root.columnconfigure(1, weight=2)
 
         # Row 0 (toolbar) and Row 3 (optional keytips) take minimum height;
-        # Rows 1 (Arm) and 2 (Flex) share vertical space without uniform='row' bloat.
+        # Rows 1 (Arm) and 2 (Flex) share vertical space.
         self.root.rowconfigure(0, weight=0)
         self.root.rowconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=1)
@@ -92,9 +91,9 @@ class FlexGridGUI:
     def _build_toolbar(self):
         bar = ttk.Frame(self.root, padding=(4, 4, 4, 0))
         bar.grid(row=0, column=0, columnspan=2, sticky='ew')
-        for c in range(3):
+        for c in range(4):
             bar.columnconfigure(c, weight=1)
-        bar.columnconfigure(3, weight=0)
+        bar.columnconfigure(4, weight=0)
 
         ttk.Button(bar, text='HOME (Ctrl+H)',
                    command=self.node.cmd_home).grid(
@@ -102,14 +101,17 @@ class FlexGridGUI:
         ttk.Button(bar, text='RESET (Ctrl+R)',
                    command=self.node.cmd_reset).grid(
             row=0, column=1, padx=2, sticky='ew')
+        ttk.Button(bar, text='BIRD-EYE (Ctrl+B)',
+                   command=self.node.cmd_bird_eye_view).grid(
+            row=0, column=2, padx=2, sticky='ew')
         ttk.Button(bar, text='PULL OUT (Ctrl+P)',
                    command=self.node.cmd_pull_out).grid(
-            row=0, column=2, padx=2, sticky='ew')
+            row=0, column=3, padx=2, sticky='ew')
 
         self.keys_btn_var = tk.StringVar(value='? Keys \u25bc')
         ttk.Button(bar, textvariable=self.keys_btn_var, width=9,
                    command=self._toggle_keytips).grid(
-            row=0, column=3, padx=(6, 2))
+            row=0, column=4, padx=(6, 2))
 
     # ------------------------------------------------------------------
     # Row 1: Arm section (State in 3x2 grid | Controls)
@@ -280,8 +282,8 @@ class FlexGridGUI:
         ttk.Label(
             self.keytips_frame, justify='left', font=('Consolas', 8),
             text=(
-                "Flex : W straighten | S bend | A/D base yaw\n"
-                "Auto : Ctrl+H HOME | Ctrl+R RESET | Ctrl+P PULL OUT"
+                "Flex : W straighten | S bend | A/D steer yaw (y-axis auto-horizon)\n"
+                "Auto : Ctrl+H HOME | Ctrl+R RESET | Ctrl+B BIRD-EYE | Ctrl+P PULL OUT"
             )
         ).grid(row=0, column=1, sticky='nw', padx=4)
 
@@ -291,11 +293,11 @@ class FlexGridGUI:
             self.keytips_frame.grid(
                 row=3, column=0, columnspan=2, sticky='ew', padx=4, pady=(0, 4))
             self.keys_btn_var.set('? Keys \u25b2')
-            self.root.geometry('530x475')
+            self.root.geometry('580x475')
         else:
             self.keytips_frame.grid_remove()
             self.keys_btn_var.set('? Keys \u25bc')
-            self.root.geometry('530x395')
+            self.root.geometry('580x395')
 
     # ------------------------------------------------------------------
     # Periodic UI refresh

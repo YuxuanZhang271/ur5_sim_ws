@@ -26,6 +26,28 @@
   <material name="tendon_yellow"><color rgba="1.0 1.0 0.0 1.0"/></material>
 
   <!-- ================================================================
+       Gazebo JointPositionController helper macro (velocity-command mode)
+       Locks each continuum revolute joint in dartsim to the commanded
+       angle without gravity sag or passive Z-axis drift.
+       ================================================================ -->
+  <xacro:macro name="flex_joint_position_controller" params="joint_name topic_name">
+    <gazebo>
+      <plugin filename="gz-sim-joint-position-controller-system"
+              name="gz::sim::systems::JointPositionController">
+        <joint_name>${joint_name}</joint_name>
+        <topic>${topic_name}</topic>
+        <use_velocity_commands>true</use_velocity_commands>
+        <p_gain>20.0</p_gain>
+        <i_gain>0.0</i_gain>
+        <d_gain>0.0</d_gain>
+        <cmd_max>10.0</cmd_max>
+        <cmd_min>-10.0</cmd_min>
+        <initial_position>0.0</initial_position>
+      </plugin>
+    </gazebo>
+  </xacro:macro>
+
+  <!-- ================================================================
        Tendon markers as SEPARATE LINKS.
        ================================================================ -->
   <xacro:macro name="tendon_marker_link" params="parent_link x_off y_off z_off tag name material_name">
@@ -72,12 +94,9 @@
       <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
       <material name="blue"/>
     </visual>
-    <collision>
-      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
-    </collision>
     <inertial>
       <mass value="0.001"/>
-      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
   </link>
 
@@ -87,7 +106,9 @@
     <origin xyz="0 0 ${CYL_LEN/2}" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
     <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+    <dynamics damping="0.1" friction="0.01"/>
   </joint>
+  <xacro:flex_joint_position_controller joint_name="base_yaw" topic_name="/flex/base_yaw"/>
 
   <link name="yaw_base">
     <inertial>
@@ -104,14 +125,10 @@
   <!-- Segment 1 -->
   <link name="segment_1">
     <xacro:segment_tube_visual/>
-    <collision>
-      <origin xyz="0 0 ${SEG_LEN/2}"/>
-      <geometry><cylinder radius="${SEG_RADIUS}" length="${SEG_LEN}"/></geometry>
-    </collision>
     <inertial>
       <origin xyz="0 0 ${SEG_LEN/2}"/>
-      <mass value="0.0001"/>
-      <inertia ixx="1e-10" ixy="0" ixz="0" iyy="1e-10" iyz="0" izz="1e-10"/>
+      <mass value="1e-3"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
   </link>
 
@@ -131,7 +148,10 @@
       <origin xyz="0 0 ${origin_z}" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
       <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+      <dynamics damping="0.1" friction="0.01"/>
     </joint>
+    <xacro:flex_joint_position_controller joint_name="ext_yaw_${idx}" topic_name="/flex/ext_yaw"/>
+
     <link name="ext_yaw_mid_${idx}">
       <inertial>
         <mass value="1e-3"/>
@@ -144,8 +164,11 @@
       <child link="ext_pitch_mid_${idx}"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
-      <limit effort="100" velocity="10" lower="-${PER_BEND_MAX}" upper="${PER_BEND_MAX}"/>
+      <limit effort="100" velocity="10" lower="${-PER_BEND_MAX}" upper="${PER_BEND_MAX}"/>
+      <dynamics damping="0.1" friction="0.01"/>
     </joint>
+    <xacro:flex_joint_position_controller joint_name="ext_pitch_${idx}" topic_name="/flex/ext_pitch"/>
+
     <link name="ext_pitch_mid_${idx}">
       <inertial>
         <mass value="1e-3"/>
@@ -159,7 +182,10 @@
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
       <limit effort="100" velocity="10" lower="-3.14159" upper="3.14159"/>
+      <dynamics damping="0.1" friction="0.01"/>
     </joint>
+    <xacro:flex_joint_position_controller joint_name="ext_yaw_back_${idx}" topic_name="/flex/ext_yaw_back"/>
+
     <link name="ext_yaw_back_mid_${idx}">
       <inertial>
         <mass value="1e-3"/>
@@ -167,33 +193,22 @@
       </inertial>
     </link>
 
-    <joint name="extension_${idx}" type="prismatic">
+    <!-- Fixed extension offset (SEG_LEN) baked into the joint origin
+      so segments stand along z of the pole. Keep this comment free of
+      "colon space" sequences since it survives xacro processing and
+      launch_ros yaml-parses the robot_description parameter string. -->
+    <joint name="extension_${idx}" type="fixed">
       <parent link="ext_yaw_back_mid_${idx}"/>
       <child link="segment_${idx+1}"/>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <axis xyz="0 0 1"/>
-      <limit effort="100" velocity="1.0" lower="0" upper="${SEG_LEN}"/>
+      <origin xyz="0 0 ${SEG_LEN}" rpy="0 0 0"/>
     </joint>
-
-    <!-- Start the extension at SEG_LEN so the 8 segments are spaced
-      apart on simulation boot. URDF joint defaults are 0 which
-      collapses every cylinder onto one origin and breaks the LCP.
-      The gazebo reference= form is used instead of a bare nested
-      joint block, which gz-sim would reject as malformed SDF. -->
-    <gazebo reference="extension_${idx}">
-      <initial_position>${SEG_LEN}</initial_position>
-    </gazebo>
 
     <link name="segment_${idx+1}">
       <xacro:segment_tube_visual/>
-      <collision>
-        <origin xyz="0 0 ${SEG_LEN/2}"/>
-        <geometry><cylinder radius="${SEG_RADIUS}" length="${SEG_LEN}"/></geometry>
-      </collision>
       <inertial>
         <origin xyz="0 0 ${SEG_LEN/2}"/>
-        <mass value="0.0001"/>
-        <inertia ixx="1e-10" ixy="0" ixz="0" iyy="1e-10" iyz="0" izz="1e-10"/>
+        <mass value="1e-3"/>
+        <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
       </inertial>
     </link>
 
@@ -223,12 +238,9 @@
       <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
       <material name="red"/>
     </visual>
-    <collision>
-      <geometry><cylinder radius="${CYL_RADIUS}" length="${CYL_LEN}"/></geometry>
-    </collision>
     <inertial>
       <mass value="0.001"/>
-      <inertia ixx="1e-9" ixy="0" ixz="0" iyy="1e-9" iyz="0" izz="1e-9"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
   </link>
 

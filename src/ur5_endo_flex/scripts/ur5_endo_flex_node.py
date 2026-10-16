@@ -9,10 +9,19 @@ Arm (ur5_endoscope side):
     so shoulder_lift + elbow + wrist_1 = -270 deg (AGENT constraint 1).
 
 Flex (endo_flex_control side):
-    Same kinematic model as the upstream endoflex_teleop: a continuum
-    parameterised by base_yaw, arc_len, ext_yaw, curvature κ.
-    JointState for the 7 segment groups is published on /joint_states
-    (UR joint names do not overlap, so robot_state_publisher merges).
+    Continuum parameterised by base_yaw, arc_len, ext_yaw, curvature κ.
+    - Automatic horizon twist compensation: at every control tick,
+      base_yaw and ext_yaw are automatically adjusted from the current
+      UR5 FK so that the y-axis of endo_flex (and end_cylinder) is
+      always kept horizontal (parallel to the world horizon plane).
+    - JointState for the 7 segment groups is published on /joint_states
+      (UR joint names do not overlap, so robot_state_publisher merges).
+    - Float64 position commands are simultaneously published on
+      /flex/base_yaw, /flex/ext_yaw, /flex/ext_pitch, and
+      /flex/ext_yaw_back (bridged via ros_gz_bridge to Gazebo's
+      JointPositionController plugins) so that the physical simulation
+      and distal camera in Gazebo rotate and bend synchronously with
+      RViz.
 
 Modes:
     arm_mode ∈ {linear, rcm}     default = linear
@@ -21,18 +30,27 @@ Modes:
     that applies velocity-limited commands per held key.
 
 Semi-auto:
-    ctrl+H   HOME       arm → HOME_DEG; flex → base_yaw=0, arc=ARC_MAX,
-                        ext_yaw=0, curvature=0 (straight)
+    ctrl+H   HOME       arm → HOME_DEG; flex → straight, horizon-leveled
     ctrl+R   RESET      HOME + arm_mode=linear, flex_mode=fixed
-    ctrl+P   PULL OUT   align tube to captured RCM ref axis, flex=0,
-                        retract so end_cylinder is 10 cm behind RCM
-                        (RCM mode only)
+    ctrl+B   BIRD-EYE   flex bends downward in the vertical plane so
+                        end_cylinder has a 30 deg angle with the horizon
+    ctrl+P   PULL OUT   (RCM mode only) two-stage pull-out:
+                        (a) fully straighten endo_flex and align the
+                            endoscope direction to the fixed central
+                            RCM axis (keeping current insertion depth),
+                        (b) continuously retract along the fixed central
+                            axis until the endo_flex end (end_cylinder)
+                            is 10 cm behind the fixed RCM point.
 
 Topics
 ------
-    Sub : /joint_states     (UR joint positions from ros2_control)
-    Pub : <controller_topic>      JointTrajectory for arm
-    Pub : /joint_states          JointState for the flex joints
+    Sub : /joint_states          (UR joint positions from ros2_control)
+    Pub : <controller_topic>     JointTrajectory for arm
+    Pub : /joint_states          JointState for the flex joints (RViz TF)
+    Pub : /flex/base_yaw         Float64 for Gazebo base_yaw joint
+    Pub : /flex/ext_yaw          Float64 for Gazebo ext_yaw_1..7 joints
+    Pub : /flex/ext_pitch        Float64 for Gazebo ext_pitch_1..7 joints
+    Pub : /flex/ext_yaw_back     Float64 for Gazebo ext_yaw_back_1..7 joints
     Pub : <marker_topic>         MarkerArray (visualization)
 """
 
@@ -48,7 +66,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from std_msgs.msg import String, ColorRGBA
+from std_msgs.msg import String, ColorRGBA, Float64
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
@@ -72,6 +90,8 @@ FLEX_ARC_MAX = 0.050
 FLEX_MAX_BEND = math.pi / 2.0
 FLEX_TENDON_R = 0.004
 FLEX_TENDONS = [(0, 'R'), (90, 'G'), (180, 'B'), (270, 'Y')]
+BIRD_EYE_HORIZON_DEG = 30.0
+PULL_OUT_BEHIND_RCM_M = 0.10
 
 
 class Ur5EndoFlexNode(Node):
@@ -188,10 +208,17 @@ class Ur5EndoFlexNode(Node):
         self.flex_mode = 'fixed'    # 'free'   | 'fixed'
 
         # Flex state — start straight (curvature=0) per spec.
+        # flex_steer_yaw is the user-commanded steering offset (A/D) relative
+        # to the downward vertical plane; flex_base_yaw and flex_ext_yaw are
+        # automatically updated to keep the y-axis horizontal.
+        self.flex_steer_yaw = 0.0
         self.flex_base_yaw = 0.0
         self.flex_arc_len = FLEX_ARC_MAX
         self.flex_ext_yaw = 0.0
         self.flex_curvature = 0.0
+
+        # Active two-stage PULL OUT state machine (None when idle).
+        self._pull_out_state = None
 
         # Continuous-control key state (keyboard + GUI buttons share this)
         self._key_lock = threading.Lock()
@@ -206,21 +233,32 @@ class Ur5EndoFlexNode(Node):
         self._ctrl_held = False
 
         # ---------- ROS I/O ----------
-        traj_qos = QoSProfile(
-            depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        pub_qos = QoSProfile(
+            depth=10, reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST)
         self.traj_pub = self.create_publisher(
-            JointTrajectory, self.controller_topic, traj_qos)
+            JointTrajectory, self.controller_topic, pub_qos)
 
-        js_qos = QoSProfile(
+        self.flex_js_pub = self.create_publisher(
+            JointState, '/joint_states', pub_qos)
+
+        # Gazebo JointPositionController command publishers (bridged via ros_gz_bridge)
+        self.gz_base_yaw_pub = self.create_publisher(
+            Float64, '/flex/base_yaw', pub_qos)
+        self.gz_ext_yaw_pub = self.create_publisher(
+            Float64, '/flex/ext_yaw', pub_qos)
+        self.gz_ext_pitch_pub = self.create_publisher(
+            Float64, '/flex/ext_pitch', pub_qos)
+        self.gz_ext_yaw_back_pub = self.create_publisher(
+            Float64, '/flex/ext_yaw_back', pub_qos)
+
+        js_sub_qos = QoSProfile(
             depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST)
-        self.flex_js_pub = self.create_publisher(
-            JointState, '/joint_states', js_qos)
         self.create_subscription(
-            JointState, '/joint_states', self._joint_state_cb, js_qos)
+            JointState, '/joint_states', self._joint_state_cb, js_sub_qos)
 
         urdf_qos = QoSProfile(
             depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
@@ -294,9 +332,24 @@ class Ur5EndoFlexNode(Node):
     # Continuous control tick (called by timer at ~control_tick_hz)
     # ==================================================================
     def _tick(self):
-        """Apply velocity-based commands for any currently-held keys/buttons."""
+        """Apply velocity-based commands for any currently-held keys/buttons
+        or active semi-automatic sequences, and auto-level endo_flex twist."""
         with self._key_lock:
             ks = dict(self._key_state)
+
+        any_manual_key = any(ks.values())
+        with self._state_lock:
+            pull_out_active = self._pull_out_state is not None
+            if pull_out_active and any_manual_key:
+                self._pull_out_state = None
+                pull_out_active = False
+                self.get_logger().info(
+                    'PULL OUT cancelled by manual key input.')
+
+        if pull_out_active:
+            self._step_pull_out()
+            self._publish_flex_joint_states()
+            return
 
         # Aggregate per-DoF increments for this tick.
         # In linear mode: arrows move in (vertical, horiz perp tube, none).
@@ -314,11 +367,10 @@ class Ur5EndoFlexNode(Node):
 
         if mode == 'rcm':
             # Arrow keys → tilt around RCM (world frame)
-            if ks['arm_up']:    arm_tilt_up   += self.arm_tilt_vel * self.dt
-            if ks['arm_down']:  arm_tilt_up   -= self.arm_tilt_vel * self.dt
+            if ks['arm_up']:    arm_tilt_up    += self.arm_tilt_vel * self.dt
+            if ks['arm_down']:  arm_tilt_up    -= self.arm_tilt_vel * self.dt
             if ks['arm_right']: arm_tilt_right += self.arm_tilt_vel * self.dt
             if ks['arm_left']:  arm_tilt_right -= self.arm_tilt_vel * self.dt
-            # No position deltas in RCM mode (arrows do tilt instead).
         else:
             # Linear mode → arrows do Cartesian position deltas.
             if ks['arm_up']:    arm_dz += self.arm_linear_vel * self.dt
@@ -327,11 +379,10 @@ class Ur5EndoFlexNode(Node):
             if ks['arm_left']:  arm_dy -= self.arm_linear_vel * self.dt
 
         # [/] always means along the tube axis (forward/backward).
-        # Direction reversed per user request:
-        #   [  = fwd key  → OUT (retract, away from tip)
-        #   ]  = bwd key  → IN  (insert, toward tip)
-        if ks['arm_fwd']: arm_dx -= self.arm_axis_vel * self.dt   # OUT
-        if ks['arm_bwd']: arm_dx += self.arm_axis_vel * self.dt   # IN
+        #   [  = fwd key  → along -axis (toward distal tip)
+        #   ]  = bwd key  → along +axis (toward proximal mount / out)
+        if ks['arm_fwd']: arm_dx -= self.arm_axis_vel * self.dt
+        if ks['arm_bwd']: arm_dx += self.arm_axis_vel * self.dt
 
         if arm_dx or arm_dy or arm_dz:
             self._arm_linear_step(arm_dx, arm_dy, arm_dz,
@@ -341,8 +392,7 @@ class Ur5EndoFlexNode(Node):
                                np.rad2deg(arm_tilt_up),
                                traj_duration=self.dt)
 
-        # Flex commands (same in both free & fixed modes; only the yaw
-        # step differs in how base_yaw / ext_yaw are coupled).
+        # Flex commands
         flex_updated = False
         if ks['flex_w']:
             self._flex_curvature_step(-self.flex_curv_vel * self.dt)
@@ -357,8 +407,9 @@ class Ur5EndoFlexNode(Node):
             self._flex_yaw_step(-self.flex_yaw_vel * self.dt)
             flex_updated = True
 
-        # Keep flex JointStates continuously published so robot_state_publisher
-        # always maintains fresh TF transforms up to end_cylinder.
+        # Always run _publish_flex_joint_states() on every tick so that
+        # automatic horizon twist compensation tracks any UR5 arm motion
+        # and keeps RViz + Gazebo JointPositionControllers synchronized.
         if not flex_updated:
             self._publish_flex_joint_states()
 
@@ -391,7 +442,6 @@ class Ur5EndoFlexNode(Node):
         proj = tube_axis - np.dot(tube_axis, world_z) * world_z
         pn = np.linalg.norm(proj)
         if pn < 1e-6:
-            # Tube axis is (nearly) vertical; fall back to world Y for left/right.
             left = np.array([0.0, 1.0, 0.0])
         else:
             proj = proj / pn
@@ -491,7 +541,7 @@ class Ur5EndoFlexNode(Node):
         return True
 
     # ==================================================================
-    # Flex commands
+    # Flex commands & automatic horizon-keeping twist
     # ==================================================================
     def _flex_curvature_step(self, dkappa):
         with self._state_lock:
@@ -503,24 +553,51 @@ class Ur5EndoFlexNode(Node):
 
     def _flex_yaw_step(self, dyaw_rad):
         with self._state_lock:
-            self.flex_base_yaw += dyaw_rad
-            if self.flex_mode == 'fixed':
-                # Counter-rotate ext_yaw so end_cylinder z stays fixed.
-                self.flex_ext_yaw -= dyaw_rad
+            self.flex_steer_yaw = (
+                (self.flex_steer_yaw + dyaw_rad + math.pi)
+                % (2.0 * math.pi) - math.pi
+            )
         self._publish_flex_joint_states()
+
+    def _update_auto_horizon_twist_unlocked(self, theta_total):
+        """Recompute (flex_base_yaw, flex_ext_yaw) so endo_flex's y-axis is
+        always kept on the horizontal plane. Must be called with _state_lock held."""
+        if self.kin.ready and self.joint_received:
+            try:
+                base_yaw, ext_yaw = self.kin.solve_horizon_flex_yaw(
+                    q=self.joint_positions,
+                    steer_yaw=self.flex_steer_yaw,
+                    theta_total=theta_total,
+                    flex_mode=self.flex_mode,
+                )
+                self.flex_base_yaw = float(base_yaw)
+                self.flex_ext_yaw = float(ext_yaw)
+                return
+            except Exception as e:
+                self.get_logger().warn(
+                    f'Auto horizon twist computation failed: {e}')
+
+        # Fallback before KDL/joint_states are ready:
+        if self.flex_mode == 'fixed':
+            self.flex_base_yaw = float(self.flex_steer_yaw)
+            self.flex_ext_yaw = float(-self.flex_steer_yaw)
+        else:
+            self.flex_base_yaw = float(self.flex_steer_yaw)
+            self.flex_ext_yaw = 0.0
 
     def _publish_flex_joint_states(self):
         with self._state_lock:
             eff = max(1e-6, self.flex_arc_len - FLEX_SEG_LEN)
             kappa = max(0.0, self.flex_curvature)
-            base_yaw = self.flex_base_yaw
-            ext_yaw = self.flex_ext_yaw
-        theta_total = eff * kappa
-        if theta_total > FLEX_MAX_BEND:
-            theta_total = FLEX_MAX_BEND
-        theta_seg = theta_total / (FLEX_N - 1)
-        d_seg = eff / (FLEX_N - 1)
+            theta_total = min(FLEX_MAX_BEND, eff * kappa)
+            self._update_auto_horizon_twist_unlocked(theta_total)
+            base_yaw = float(self.flex_base_yaw)
+            ext_yaw = float(self.flex_ext_yaw)
 
+        theta_seg = float(theta_total / (FLEX_N - 1))
+        d_seg = float(eff / (FLEX_N - 1))
+
+        # 1. Publish JointState to /joint_states for robot_state_publisher (RViz TF).
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         names = ['base_yaw']
@@ -538,11 +615,19 @@ class Ur5EndoFlexNode(Node):
         msg.position = [float(x) for x in positions]
         self.flex_js_pub.publish(msg)
 
+        # 2. Publish Float64 commands to Gazebo JointPositionControllers so the
+        #    physical simulation and distal camera move identically to RViz.
+        self.gz_base_yaw_pub.publish(Float64(data=base_yaw))
+        self.gz_ext_yaw_pub.publish(Float64(data=ext_yaw))
+        self.gz_ext_pitch_pub.publish(Float64(data=theta_seg))
+        self.gz_ext_yaw_back_pub.publish(Float64(data=-ext_yaw))
+
     # ==================================================================
     # Mode toggles
     # ==================================================================
     def toggle_arm_mode(self):
         with self._state_lock:
+            self._pull_out_state = None
             if self.arm_mode == 'linear':
                 self.arm_mode = 'rcm'
                 self._capture_rcm_unlocked()
@@ -570,6 +655,7 @@ class Ur5EndoFlexNode(Node):
         with self._state_lock:
             self.flex_mode = 'free' if self.flex_mode == 'fixed' else 'fixed'
             mode = self.flex_mode
+        self._publish_flex_joint_states()
         self.get_logger().info(f'Flex mode -> {mode}.')
 
     # ==================================================================
@@ -578,9 +664,9 @@ class Ur5EndoFlexNode(Node):
     def cmd_home(self):
         """HOME: arm to HOME_DEG (with wrist_1 auto-solved); flex straight."""
         with self._state_lock:
-            self.flex_base_yaw = 0.0
+            self._pull_out_state = None
+            self.flex_steer_yaw = 0.0
             self.flex_arc_len = FLEX_ARC_MAX
-            self.flex_ext_yaw = 0.0
             self.flex_curvature = 0.0
         self._publish_flex_joint_states()
 
@@ -591,6 +677,7 @@ class Ur5EndoFlexNode(Node):
     def cmd_reset(self):
         """RESET: HOME + arm_mode=linear, flex_mode=fixed; clear RCM."""
         with self._state_lock:
+            self._pull_out_state = None
             self.arm_mode = 'linear'
             self.flex_mode = 'fixed'
             self.rcm_enabled = False
@@ -598,40 +685,187 @@ class Ur5EndoFlexNode(Node):
             self.rcm_ref_depth = None
         self.cmd_home()
 
-    def cmd_pull_out(self):
-        """PULL OUT (RCM mode only): align tube to RCM ref axis, flex=0,
-        retract so end_cylinder is 10 cm behind RCM point."""
+    def cmd_bird_eye_view(self):
+        """BIRD-EYE VIEW: bend endo_flex downward in the vertical plane so
+        that end_cylinder has a 30 deg downward angle with the horizon plane,
+        while keeping the y-axis horizontal."""
+        if not (self.kin.ready and self.joint_received):
+            self.get_logger().warn(
+                'BIRD-EYE VIEW waiting for kinematics and /joint_states.')
+            return
+
         with self._state_lock:
-            rcm_on = self.rcm_enabled
+            self._pull_out_state = None
+            q_now = self.joint_positions.copy()
+            eff = max(1e-6, self.flex_arc_len - FLEX_SEG_LEN)
+            theta_target = self.kin.solve_bird_eye_bend_angle(
+                q=q_now,
+                target_horizon_deg=BIRD_EYE_HORIZON_DEG,
+                max_bend_rad=FLEX_MAX_BEND,
+            )
+            self.flex_steer_yaw = 0.0
+            self.flex_curvature = float(theta_target / eff)
+
+        self._publish_flex_joint_states()
+        self.get_logger().info(
+            f'BIRD-EYE VIEW: bent downward to {math.degrees(theta_target):.1f} deg '
+            f'(30.0 deg angle with horizon plane).')
+
+    def cmd_pull_out(self):
+        """PULL OUT (RCM mode only):
+        Stage (a): Fully straighten endo_flex and align the endoscope shaft
+                   direction to the captured RCM fixed central axis (keeping
+                   current insertion depth).
+        Stage (b): Continuously retract outward along the fixed central axis
+                   until the endo_flex end (end_cylinder) is 10 cm behind
+                   the fixed RCM point.
+        """
+        with self._state_lock:
+            rcm_on = (self.arm_mode == 'rcm' and self.rcm_enabled)
             rcm_pt = (None if self.rcm_world_point is None
                       else self.rcm_world_point.copy())
             ref_axis = (None if self.rcm_ref_axis is None
                         else self.rcm_ref_axis.copy())
             q_now = self.joint_positions.copy()
+
         if not (rcm_on and rcm_pt is not None and ref_axis is not None):
-            self.get_logger().warn('PULL OUT requires RCM mode.')
+            self.get_logger().warn(
+                'PULL OUT can only be triggered when RCM mode is ON.')
             return
         if not (self.kin.ready and self.joint_received):
             return
 
-        # Straighten flex.
-        with self._state_lock:
-            self.flex_base_yaw = 0.0
-            self.flex_ext_yaw = 0.0
-            self.flex_curvature = 0.0
-        self._publish_flex_joint_states()
-
-        # end_cylinder (straight flex) = endoscope_tip + arc_len * (-ref_axis)
-        # Want end_cylinder = rcm_pt - 0.10 * ref_axis
-        # => endoscope_tip = rcm_pt + (arc_len - 0.10) * ref_axis
-        arc_len = FLEX_ARC_MAX
-        tip_target = rcm_pt + (arc_len - 0.10) * ref_axis
-        q_target = self.kin.ik_with_rcm(tip_target, rcm_pt, q_now)
-        if q_target is None:
-            self.get_logger().warn('PULL OUT IK failed.')
+        try:
+            axis_cur, _, p_tip_cur = self.kin.tube_axis_in_base(q_now)
+            p_end_cur = self.kin.end_cylinder_in_base(q_now)
+        except Exception as e:
+            self.get_logger().warn(f'PULL OUT FK failed: {e}')
             return
-        q_target = self._auto_solve_wrist1(q_target)
-        self._send_trajectory(q_target, traj_duration=2.0)
+
+        # Distance from rcm_pt to p_tip along current tube axis (preserves
+        # current insertion depth during Stage a direction alignment).
+        d_tip_align = float(np.linalg.norm(p_tip_cur - rcm_pt))
+        if d_tip_align < 0.05:
+            d_tip_align = float(self.kin.tube_length)
+
+        # Constant distance along the shaft between p_tip (z=+0.20195) and
+        # straight end_cylinder (z=-0.4645): ~0.66645 m.
+        tip_from_end = float(np.linalg.norm(p_tip_cur - p_end_cur))
+
+        with self._state_lock:
+            # Step (a.1): Immediately straighten endo_flex.
+            self.flex_steer_yaw = 0.0
+            self.flex_curvature = 0.0
+            self._pull_out_state = {
+                'stage': 'align',
+                'axis_cmd': axis_cur.copy(),
+                'd_tip_align': d_tip_align,
+                'tip_from_end': tip_from_end,
+                's_end_cmd': None,
+            }
+
+        self._publish_flex_joint_states()
+        self.get_logger().info(
+            'PULL OUT started: Stage (a) straightening flex & aligning '
+            'endoscope direction to fixed RCM central axis.')
+
+    def _step_pull_out(self):
+        """Execute one 20 Hz tick of the two-stage PULL OUT sequence."""
+        if not self._arm_ready():
+            return
+
+        with self._state_lock:
+            st = self._pull_out_state
+            if st is None:
+                return
+            if not (self.arm_mode == 'rcm' and self.rcm_enabled
+                    and self.rcm_world_point is not None
+                    and self.rcm_ref_axis is not None):
+                self._pull_out_state = None
+                return
+            rcm_pt = self.rcm_world_point.copy()
+            ref_axis = self.rcm_ref_axis.copy()
+            q_now = self.joint_positions.copy()
+            # Keep flex straight throughout pull-out.
+            self.flex_steer_yaw = 0.0
+            self.flex_curvature = 0.0
+
+        try:
+            axis_cur, _, p_tip_cur = self.kin.tube_axis_in_base(q_now)
+            p_end_cur = self.kin.end_cylinder_in_base(q_now)
+        except Exception as e:
+            self.get_logger().warn(f'PULL OUT FK failed: {e}')
+            with self._state_lock:
+                self._pull_out_state = None
+            return
+
+        # ---------------- Stage (a): Align direction to ref_axis ----------------
+        if st['stage'] == 'align':
+            axis_cmd = st['axis_cmd']
+            cos_cmd = float(np.clip(np.dot(axis_cmd, ref_axis), -1.0, 1.0))
+            err_cmd = math.acos(cos_cmd)
+            step_rad = self.arm_tilt_vel * self.dt
+
+            if err_cmd <= step_rad or err_cmd < 1e-3:
+                axis_next = ref_axis.copy()
+            else:
+                rot_k = np.cross(axis_cmd, ref_axis)
+                kn = float(np.linalg.norm(rot_k))
+                if kn < 1e-9:
+                    axis_next = ref_axis.copy()
+                else:
+                    axis_next = self.kin.rotate_about(
+                        axis_cmd, rot_k / kn, step_rad)
+                    axis_next /= max(float(np.linalg.norm(axis_next)), 1e-9)
+
+            st['axis_cmd'] = axis_next
+            p_tip_target = rcm_pt + st['d_tip_align'] * axis_next
+            q_target = self.kin.ik_along_axis(p_tip_target, axis_next, q_now)
+            if q_target is not None:
+                q_target = self._auto_solve_wrist1(q_target)
+                self._send_trajectory(q_target, traj_duration=self.dt)
+
+            # Check actual alignment with ref_axis to transition to Stage (b)
+            cos_actual = float(np.clip(np.dot(axis_cur, ref_axis), -1.0, 1.0))
+            err_actual_deg = math.degrees(math.acos(cos_actual))
+            if np.allclose(axis_next, ref_axis, atol=1e-3) and err_actual_deg < 1.0:
+                s_end_cur = float(np.dot(p_end_cur - rcm_pt, ref_axis))
+                st['stage'] = 'retract'
+                st['s_end_cmd'] = s_end_cur
+                self.get_logger().info(
+                    f'PULL OUT Stage (a) aligned (err={err_actual_deg:.2f} deg). '
+                    f'Stage (b) retracting along fixed central axis to 10 cm behind RCM.')
+            return
+
+        # ---------------- Stage (b): Retract along ref_axis ----------------
+        if st['stage'] == 'retract':
+            s_end_cur = float(np.dot(p_end_cur - rcm_pt, ref_axis))
+            if st['s_end_cmd'] is None:
+                st['s_end_cmd'] = s_end_cur
+
+            s_end_cmd = float(st['s_end_cmd'])
+            step_m = self.arm_axis_vel * self.dt
+            if s_end_cmd + step_m >= PULL_OUT_BEHIND_RCM_M:
+                s_end_next = PULL_OUT_BEHIND_RCM_M
+            else:
+                s_end_next = s_end_cmd + step_m
+            st['s_end_cmd'] = s_end_next
+
+            p_tip_target = (
+                rcm_pt + (st['tip_from_end'] + s_end_next) * ref_axis
+            )
+            q_target = self.kin.ik_along_axis(p_tip_target, ref_axis, q_now)
+            if q_target is not None:
+                q_target = self._auto_solve_wrist1(q_target)
+                self._send_trajectory(q_target, traj_duration=self.dt)
+
+            if (s_end_next >= PULL_OUT_BEHIND_RCM_M - 1e-4
+                    and s_end_cur >= PULL_OUT_BEHIND_RCM_M - 0.003):
+                with self._state_lock:
+                    self._pull_out_state = None
+                self.get_logger().info(
+                    f'PULL OUT complete: endo_flex end is '
+                    f'{s_end_cur * 100.0:.1f} cm behind fixed RCM point.')
 
     # ==================================================================
     # Key state (used by keyboard listener AND GUI button bindings)
@@ -658,11 +892,12 @@ class Ur5EndoFlexNode(Node):
         # Ctrl + letter → semi-auto commands.
         if ctrl_held and ch is not None:
             ch_l = ch.lower()
-            if ch_l == 'm': self.toggle_arm_mode(); return
-            if ch_l == 'n': self.toggle_flex_mode(); return
-            if ch_l == 'h': self.cmd_home();        return
-            if ch_l == 'r': self.cmd_reset();       return
-            if ch_l == 'p': self.cmd_pull_out();    return
+            if ch_l == 'm': self.toggle_arm_mode();   return
+            if ch_l == 'n': self.toggle_flex_mode();  return
+            if ch_l == 'h': self.cmd_home();          return
+            if ch_l == 'r': self.cmd_reset();         return
+            if ch_l == 'b': self.cmd_bird_eye_view(); return
+            if ch_l == 'p': self.cmd_pull_out();      return
 
         # Arrow keys → arm.
         m = {

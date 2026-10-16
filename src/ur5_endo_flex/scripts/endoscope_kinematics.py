@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-KDL kinematics for the UR5 + endoscope chain.
+KDL kinematics for the UR5 + endoscope + endo_flex chain.
 
 Provides:
-  - Chain setup from a URDF string
-  - Forward kinematics (points / axes in the base frame)
+  - Chain setup from a URDF string (both base_link -> endoscope_link
+    and base_link -> flex_base_link)
+  - Forward kinematics (points / axes / frames in the base frame)
+  - Automatic horizon-leveling twist solver for endo_flex so that
+    the y-axis of endo_flex (and end_cylinder) is always kept on the
+    horizontal plane
+  - Bird-eye view bending angle solver (30 deg downward angle between
+    end_cylinder and the horizon plane)
   - Inverse kinematics:
       * 5-DOF wrist_1-constrained axial/line IK (ik_along_axis)
         that simultaneously enforces:
@@ -18,6 +24,7 @@ Provides:
   - Auto-solve of wrist_1 so the wrist joint points out from the base
 """
 
+import math
 import numpy as np
 
 try:
@@ -38,9 +45,51 @@ JOINT_NAMES = [
 # Default GUI pose (degrees); nothing is sent to the robot on startup.
 HOME_DEG = [0.0, -120.0, -120.0, -30.0, 90.0, 45.0]
 
+# Fallback transform from endoscope_link to flex_base_link (from ur5_endo_flex.urdf.xacro)
+# origin xyz="0 0 -0.398" rpy="3.141593 0 0.616096"
+ENDO_TO_FLEX_XYZ = np.array([0.0, 0.0, -0.398], dtype=float)
+ENDO_TO_FLEX_RPY = (3.141593, 0.0, 0.616096)
+
+# Straight-configuration offset from flex_base_link to end_cylinder center:
+# CYL_LEN/2 (0.0025) + 8 * SEG_LEN (0.064) = 0.0665 m along +Z of flex_base_link
+# (which is z = -0.398 - 0.0665 = -0.4645 m in endoscope_link frame).
+FLEX_STRAIGHT_LEN_TO_END_CYL = 0.0665
+END_CYLINDER_IN_ENDO_LINK = np.array(
+    [0.0, 0.0, -0.398 - FLEX_STRAIGHT_LEN_TO_END_CYL], dtype=float
+)
+
+
+def _rot_x(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0,   c,  -s],
+                     [0.0,   s,   c]], dtype=float)
+
+
+def _rot_y(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[  c, 0.0,   s],
+                     [0.0, 1.0, 0.0],
+                     [ -s, 0.0,   c]], dtype=float)
+
+
+def _rot_z(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[  c,  -s, 0.0],
+                     [  s,   c, 0.0],
+                     [0.0, 0.0, 1.0]], dtype=float)
+
+
+def _rpy_to_mat(r: float, p: float, y: float) -> np.ndarray:
+    return _rot_z(y) @ _rot_y(p) @ _rot_x(r)
+
+
+def _wrap_pi(angle_rad: float) -> float:
+    return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
+
 
 class EndoscopeKinematics:
-    """KDL chain + FK/IK helpers for the UR5 + endoscope."""
+    """KDL chain + FK/IK helpers for the UR5 + endoscope + endo_flex."""
 
     def __init__(self, base_link, tip_link,
                  rcm_point_local, tip_local, logger=None):
@@ -55,6 +104,10 @@ class EndoscopeKinematics:
         self.chain = None
         self.fk_solver = None
         self.ik_solver = None
+
+        self.flex_base_chain = None
+        self.flex_base_fk_solver = None
+        self._R_endo_to_flex = _rpy_to_mat(*ENDO_TO_FLEX_RPY)
 
         xy_gap = self.tip_local[:2] - self.rcm_point_local[:2]
         if np.linalg.norm(xy_gap) > 1e-4 and logger is not None:
@@ -84,6 +137,20 @@ class EndoscopeKinematics:
                 raise RuntimeError('empty chain base_link -> tip_link')
             self.fk_solver = PyKDL.ChainFkSolverPos_recursive(self.chain)
             self.ik_solver = PyKDL.ChainIkSolverPos_LMA(self.chain)
+
+            # Optional chain to flex_base_link (same 6 UR5 joints, includes
+            # endoscope_to_flex_joint fixed transform from the URDF).
+            try:
+                fb_chain = tree.getChain(self.base_link, 'flex_base_link')
+                if fb_chain.getNrOfJoints() == self.chain.getNrOfJoints():
+                    self.flex_base_chain = fb_chain
+                    self.flex_base_fk_solver = (
+                        PyKDL.ChainFkSolverPos_recursive(fb_chain)
+                    )
+            except Exception:
+                self.flex_base_chain = None
+                self.flex_base_fk_solver = None
+
             if self.logger:
                 self.logger.info(
                     f'KDL chain built: {self.chain.getNrOfJoints()} joints')
@@ -106,12 +173,46 @@ class EndoscopeKinematics:
         self.fk_solver.JntToCart(q_kdl, frame)
         return frame
 
+    def fk_matrix(self, q):
+        """Return (R_3x3, p_3) of tip_link (endoscope_link) in base_link frame."""
+        f = self.fk(q)
+        R = np.array([[f.M[0, 0], f.M[0, 1], f.M[0, 2]],
+                      [f.M[1, 0], f.M[1, 1], f.M[1, 2]],
+                      [f.M[2, 0], f.M[2, 1], f.M[2, 2]]], dtype=float)
+        p = np.array([f.p.x(), f.p.y(), f.p.z()], dtype=float)
+        return R, p
+
+    def flex_base_frame_in_base(self, q):
+        """Return (R_3x3, p_3) of flex_base_link (start_cylinder) in base_link frame."""
+        if self.flex_base_fk_solver is not None:
+            n = self.flex_base_chain.getNrOfJoints()
+            q_kdl = PyKDL.JntArray(n)
+            for i in range(n):
+                q_kdl[i] = float(q[i])
+            f = PyKDL.Frame()
+            self.flex_base_fk_solver.JntToCart(q_kdl, f)
+            R = np.array([[f.M[0, 0], f.M[0, 1], f.M[0, 2]],
+                          [f.M[1, 0], f.M[1, 1], f.M[1, 2]],
+                          [f.M[2, 0], f.M[2, 1], f.M[2, 2]]], dtype=float)
+            p = np.array([f.p.x(), f.p.y(), f.p.z()], dtype=float)
+            return R, p
+
+        R_endo, p_endo = self.fk_matrix(q)
+        R_flex = R_endo @ self._R_endo_to_flex
+        p_flex = p_endo + R_endo @ ENDO_TO_FLEX_XYZ
+        return R_flex, p_flex
+
     def point_in_base(self, q, p_local):
         f = self.fk(q)
         p = f * PyKDL.Vector(float(p_local[0]),
                              float(p_local[1]),
                              float(p_local[2]))
         return np.array([p.x(), p.y(), p.z()])
+
+    def end_cylinder_in_base(self, q):
+        """Return 3D position of end_cylinder in base_link frame when endo_flex is straight."""
+        R_flex, p_flex = self.flex_base_frame_in_base(q)
+        return p_flex + R_flex[:, 2] * FLEX_STRAIGHT_LEN_TO_END_CYL
 
     def tool_axis_in_base(self, q):
         f = self.fk(q)
@@ -134,6 +235,84 @@ class EndoscopeKinematics:
         if n < 1e-9:
             return self.tool_axis_in_base(q), p_rcm, p_tip
         return v / n, p_rcm, p_tip
+
+    # ------------------------------------------------------------------
+    # Endo-flex Automatic Horizon-Keeping Twist & Bird-Eye View Solvers
+    # ------------------------------------------------------------------
+    def solve_horizon_flex_yaw(self, q, steer_yaw=0.0, theta_total=0.0,
+                               flex_mode='fixed'):
+        """
+        Automatically compute (base_yaw, ext_yaw) so that the y-axis of
+        endo_flex (and end_cylinder) is always kept horizontal (parallel
+        to the base_link / world XY horizon plane), with +x pointing
+        downward in the vertical plane when unsteered.
+
+        Parameters
+        ----------
+        q : array-like (6,)
+            Current UR5 joint angles in radians.
+        steer_yaw : float
+            User steering angle offset (rad) from the downward vertical plane
+            (adjusted via A/D keys).
+        theta_total : float
+            Total bending angle (rad) across the continuum segments.
+        flex_mode : str
+            'fixed' keeps end_cylinder's y-axis strictly on the horizon for
+            any steer_yaw and theta_total by coordinating base_yaw & ext_yaw;
+            'free' keeps yaw_base's y-axis horizon-compensated via base_yaw
+            with ext_yaw = 0.
+        """
+        R_0, _ = self.flex_base_frame_in_base(q)
+
+        # 1. Base twist angle psi_h around start_cylinder Z so yaw_base has:
+        #      y-axis horizontal: (R_0 @ rot_z(psi_h))[2, 1] == 0
+        #      +x-axis downward : (R_0 @ rot_z(psi_h))[2, 0] <= 0
+        if math.hypot(R_0[2, 0], R_0[2, 1]) < 1e-6:
+            psi_h = 0.0
+        else:
+            psi_h = math.atan2(-R_0[2, 1], -R_0[2, 0])
+
+        if flex_mode == 'free':
+            base_yaw = _wrap_pi(psi_h + steer_yaw)
+            ext_yaw = 0.0
+            return base_yaw, ext_yaw
+
+        # 2. In 'fixed' mode (or general horizon-locked mode), the bending
+        #    plane in start_cylinder frame is alpha = psi_h + steer_yaw, and
+        #    R_end = R_0 @ rot_z(alpha) @ rot_y(theta_total) @ rot_z(-ext_yaw).
+        #    Choose gamma = -ext_yaw so end_cylinder's y-axis is strictly
+        #    horizontal (R_end[2, 1] == 0) and oriented consistently with
+        #    the horizon-leveled base y-axis (no 180-deg flip past vertical).
+        R_horiz_base = R_0 @ _rot_z(psi_h)
+        y_horiz_ref = R_horiz_base[:, 1]
+
+        alpha = psi_h + steer_yaw
+        R_b = R_0 @ _rot_z(alpha) @ _rot_y(theta_total)
+
+        if math.hypot(R_b[2, 0], R_b[2, 1]) < 1e-6:
+            gamma = -steer_yaw
+        else:
+            gamma = math.atan2(-R_b[2, 1], -R_b[2, 0])
+            y_end = -math.sin(gamma) * R_b[:, 0] + math.cos(gamma) * R_b[:, 1]
+            if float(np.dot(y_end, y_horiz_ref)) < 0.0:
+                gamma = math.atan2(R_b[2, 1], R_b[2, 0])
+
+        ext_yaw = _wrap_pi(-gamma)
+        base_yaw = _wrap_pi(alpha + gamma)
+        return base_yaw, ext_yaw
+
+    def solve_bird_eye_bend_angle(self, q, target_horizon_deg=30.0,
+                                  max_bend_rad=math.pi / 2.0):
+        """
+        Compute the downward total bending angle theta_total (rad) required
+        so that end_cylinder's viewing axis (+Z) makes a `target_horizon_deg`
+        (30 deg) downward angle with the horizontal plane.
+        """
+        R_0, _ = self.flex_base_frame_in_base(q)
+        # Current downward pitch angle of start_cylinder +Z below horizon:
+        beta_0 = math.asin(float(np.clip(-R_0[2, 2], -1.0, 1.0)))
+        theta_target = math.radians(float(target_horizon_deg)) - beta_0
+        return float(np.clip(theta_target, 0.0, max_bend_rad))
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -186,7 +365,7 @@ class EndoscopeKinematics:
         p_rcm_target = p_tip_target - self.tube_length * axis_u
         target_sum = np.deg2rad(-270.0)
 
-        # If target is far from seed (e.g. PULL OUT), warm-start with KDL LMA
+        # If target is far from seed, warm-start with KDL LMA
         q_init = np.asarray(q_seed, dtype=float).copy()
         _, _, p_tip_seed = self.tube_axis_in_base(q_init)
         if np.linalg.norm(p_tip_target - p_tip_seed) > 0.025:
