@@ -2,11 +2,12 @@
 """
 control_panel_gui.py — Compact Tkinter control panel for ur5_endo_flex.
 
-Compact Layout (~580x455 default, expandable):
+Compact Layout (~580x530 default, expandable):
     Row 0:  Top toolbar (HOME, RESET, BIRD-EYE, PULL OUT)
     Row 1:  Arm state (3x2 joint grid + RCM status) | Arm controls (mode toggle + 2x4 D-pad)
     Row 2:  Flex state (3x2 param grid + tendons)   | Flex controls (mode toggle + 2x4 WASD + R/F)
-    Row 3:  Permanent Keyboard Shortcuts panel at the bottom
+    Row 3:  Target tracking (4 target buttons + STOP + live status)
+    Row 4:  Permanent Keyboard Shortcuts panel at the bottom
 """
 
 import threading
@@ -17,7 +18,8 @@ from rclpy.executors import SingleThreadedExecutor
 import tkinter as tk
 from tkinter import ttk
 
-from ur5_endo_flex_node import Ur5EndoFlexNode, FLEX_TENDONS
+from ur5_endo_flex_node import (
+    Ur5EndoFlexNode, FLEX_TENDONS, TRACK_TARGETS)
 
 
 class FlexGridGUI:
@@ -25,25 +27,27 @@ class FlexGridGUI:
         self.node = node
         self.root = tk.Tk()
         self.root.title('ur5_endo_flex — control panel')
-        self.root.geometry('580x455')
-        self.root.minsize(520, 420)
+        self.root.geometry('580x530')
+        self.root.minsize(520, 490)
 
         # 2 columns: State (col 0) | Controls (col 1)
         self.root.columnconfigure(0, weight=3)
         self.root.columnconfigure(1, weight=2)
 
-        # Row 0 (toolbar) and Row 3 (keytips) take minimum height;
-        # Rows 1 (Arm) and 2 (Flex) share equal vertical space.
+        # Row 0 (toolbar), Row 3 (tracking) and Row 4 (keytips) take minimum
+        # height; Rows 1 (Arm) and 2 (Flex) share equal vertical space.
         self.root.rowconfigure(0, weight=0)
         self.root.rowconfigure(1, weight=1, uniform='section_row')
         self.root.rowconfigure(2, weight=1, uniform='section_row')
         self.root.rowconfigure(3, weight=0)
+        self.root.rowconfigure(4, weight=0)
 
         self._button_pressed = set()
 
         self._build_toolbar()
         self._build_arm_row()
         self._build_flex_row()
+        self._build_tracking_row()
         self._build_keytips()
 
         # Root-level ButtonRelease clears orphaned presses.
@@ -258,12 +262,41 @@ class FlexGridGUI:
             self._bind_press_hold(b, key)
 
     # ------------------------------------------------------------------
-    # Row 3: Permanent Keyboard Shortcuts Panel at Bottom
+    # Row 3: Target tracking (4 target buttons + STOP + live status)
+    # ------------------------------------------------------------------
+    def _build_tracking_row(self):
+        f = self._labeled_frame(self.root, 'Target tracking')
+        f.grid(row=3, column=0, columnspan=2, sticky='ew', padx=4, pady=3)
+
+        # [status label (wider)] [4 target buttons] [STOP]
+        f.columnconfigure(0, weight=2)
+        for c in range(1, len(TRACK_TARGETS) + 2):
+            f.columnconfigure(c, weight=1, uniform='track_btn')
+
+        self.tracking_status_var = tk.StringVar(value='Tracking: idle')
+        ttk.Label(f, textvariable=self.tracking_status_var,
+                  font=('Consolas', 8)).grid(
+            row=0, column=0, sticky='w', padx=(2, 8))
+
+        self._track_buttons = {}
+        for i, (key, label, _rgba) in enumerate(TRACK_TARGETS):
+            b = ttk.Button(
+                f, text=label,
+                command=lambda k=key: self.node.start_tracking(k))
+            b.grid(row=0, column=1 + i, padx=2, sticky='ew')
+            self._track_buttons[key] = (b, label)
+
+        ttk.Button(f, text='\u25a0 STOP',
+                   command=self._on_stop_tracking).grid(
+            row=0, column=len(TRACK_TARGETS) + 1, padx=2, sticky='ew')
+
+    # ------------------------------------------------------------------
+    # Row 4: Permanent Keyboard Shortcuts Panel at Bottom
     # ------------------------------------------------------------------
     def _build_keytips(self):
         self.keytips_frame = self._labeled_frame(self.root, 'Keyboard Shortcuts')
         self.keytips_frame.grid(
-            row=3, column=0, columnspan=2, sticky='ew', padx=4, pady=(0, 4))
+            row=4, column=0, columnspan=2, sticky='ew', padx=4, pady=(0, 4))
         self.keytips_frame.columnconfigure(0, weight=1)
         self.keytips_frame.columnconfigure(1, weight=1)
 
@@ -280,7 +313,8 @@ class FlexGridGUI:
             self.keytips_frame, justify='left', font=('Consolas', 8),
             text=(
                 "Flex : W/S straighten/bend | A/D yaw | R/F ext len\n"
-                "Auto : Ctrl+H HOME | Ctrl+R RESET | Ctrl+B BIRD-EYE | Ctrl+P PULL OUT"
+                "Auto : Ctrl+H HOME | Ctrl+R RESET | Ctrl+B BIRD-EYE | Ctrl+P PULL OUT\n"
+                "Tracking: buttons above (RCM + fixed flex) | any manual key stops"
             )
         ).grid(row=0, column=1, sticky='nw', padx=4)
 
@@ -331,6 +365,28 @@ class FlexGridGUI:
         self.tendon_L_var.set(f'L [mm] {L_row}')
         self.tendon_dL_var.set(f'\u0394L[mm] {d_row}')
 
+        # Target tracking.
+        tracking = s['tracking']
+        zone_labels = {1: 'Flex only', 2: 'Blending', 3: 'Arm takeover'}
+        if tracking is not None:
+            d = s['tracking_dist_m']
+            dist_txt = '--' if d is None else f'{d * 100:.1f}'
+            aim = s.get('tracking_aim_deg')
+            aim_txt = '--' if aim is None else f'{aim:.1f}'
+            zone_txt = zone_labels.get(s.get('tracking_zone'), '--')
+            self.tracking_status_var.set(
+                f'Tracking: {tracking} \u00b7 {dist_txt} cm \u00b7 '
+                f'aim {aim_txt}\u00b0 \u00b7 {zone_txt}'
+                + (' \u00b7 locked' if s['tracking_locked'] else ''))
+        elif s.get('tracking_refusal'):
+            self.tracking_status_var.set(
+                f'Tracking: {s["tracking_refusal"]}')
+        else:
+            self.tracking_status_var.set('Tracking: idle')
+        for key, (btn, label) in self._track_buttons.items():
+            btn.configure(
+                text=('\u25b6 ' + label) if key == tracking else label)
+
         self.root.after(200, self._refresh)
 
     # ------------------------------------------------------------------
@@ -341,6 +397,9 @@ class FlexGridGUI:
 
     def _on_flex_mode_toggle(self):
         self.node.toggle_flex_mode()
+
+    def _on_stop_tracking(self):
+        self.node.stop_tracking()
 
     # ------------------------------------------------------------------
     # Mainloop lifecycle

@@ -1,28 +1,38 @@
-# ur5_sim.launch.py
-#
-# Unified Gazebo simulation + ros2_control + RViz + Tkinter control panel
-# + ros_gz_bridge for the distal endoscope camera at end_cylinder and
-# the endo_flex Gazebo joint position controllers.
-# No MoveIt, no motion planning plugin.
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+)
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (
+    get_package_prefix,
+    get_package_share_directory,
+)
 
 
 def generate_launch_description():
     ur_sim_gz_share = get_package_share_directory('ur_simulation_gz')
     ur5_endo_flex_share = get_package_share_directory('ur5_endo_flex')
+    ur5_endo_flex_prefix = get_package_prefix('ur5_endo_flex')
+    ur5_endo_flex_lib = os.path.join(
+        ur5_endo_flex_prefix, 'lib', 'ur5_endo_flex'
+    )
+
+    # Ensure lib/ur5_endo_flex is on PYTHONPATH so all 3-level modules and
+    # kinematics helpers can always be imported by any launched node.
+    python_path = ':'.join(filter(None, [
+        ur5_endo_flex_lib,
+        os.environ.get('PYTHONPATH', ''),
+    ]))
 
     # gz-sim resolves model:// URIs by walking GZ_SIM_RESOURCE_PATH for a
     # directory named after the "package" that contains a model.config shim.
-    # Register both mesh packages; include each share dir and its parent so
-    # the entry works for both isolated and merged colcon install layouts.
     ur_description_share = get_package_share_directory('ur_description')
     ur5_endoscope_share = get_package_share_directory('ur5_endoscope')
     gz_resource_path = ':'.join(filter(None, [
@@ -46,6 +56,13 @@ def generate_launch_description():
     )
     launch_gui = LaunchConfiguration('launch_gui')
 
+    random_seed_arg = DeclareLaunchArgument(
+        'random_seed',
+        default_value='-1',
+        description='Random seed for gastrectomy anatomy & target arrangement (-1 for random).',
+    )
+    random_seed = LaunchConfiguration('random_seed')
+
     sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(ur_sim_gz_share, 'launch',
@@ -54,7 +71,7 @@ def generate_launch_description():
             'ur_type':            'ur5',
             'description_file':   description_file,
             'use_sim_time':       'true',
-            'launch_rviz':        'true',
+            'launch_rviz':        'false',
             'rviz_config_file':   rviz_config,
             'safety_limits':      'false',
             'safety_pos_margin':  '0.15',
@@ -62,10 +79,28 @@ def generate_launch_description():
         }.items(),
     )
 
+    # RViz is launched here (not via ur_simulation_gz) so that its console
+    # output is visible in the launch terminal. ur_sim_control.launch.py
+    # starts rviz2 with output="log", which hides every rviz2 error/warning
+    # from the terminal and made the black-window issue undiagnosable.
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        output='screen',
+        arguments=['-d', rviz_config],
+        # Qt6's EGL-on-X11 window-surface creation fails silently on NVIDIA
+        # proprietary drivers: the window opens but nothing is ever painted
+        # (the "all black, no panels" symptom), while Ogre's own GLX context
+        # works fine. Forcing Qt's xcb platform onto GLX fixes it. Harmless
+        # no-op if EGL already works on this machine — remove if unwanted.
+        additional_env={'QT_XCB_GL_INTEGRATION': 'glx'},
+    )
+
     # Bridge Gazebo's endoscope camera topics (/endoscope_camera/image_raw and
-    # /endoscope_camera/camera_info) to ROS 2 sensor_msgs, AND bridge the 4
-    # endo_flex JointPositionController command topics from ROS 2 to Gazebo so
-    # Gazebo physically rotates and bends the continuum joints with end_cylinder.
+    # /endoscope_camera/camera_info) to ROS 2 sensor_msgs, bridge the 4
+    # endo_flex JointPositionController command topics from ROS 2 to Gazebo,
+    # AND bridge /gastrectomy/lga_cmd for the dynamic breathing target in Gazebo.
     camera_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -79,6 +114,7 @@ def generate_launch_description():
             '/flex/ext_yaw@std_msgs/msg/Float64]gz.msgs.Double',
             '/flex/ext_pitch@std_msgs/msg/Float64]gz.msgs.Double',
             '/flex/ext_yaw_back@std_msgs/msg/Float64]gz.msgs.Double',
+            '/gastrectomy/lga_cmd@std_msgs/msg/Float64]gz.msgs.Double',
         ],
     )
 
@@ -94,6 +130,30 @@ def generate_launch_description():
             'home_positions_deg':     [0.0, -120.0, -120.0, -30.0, 90.0, 45.0],
             'trajectory_duration_s':  3.0,
             'wait_for_joint_states':  True,
+        }],
+    )
+
+    # Launch-time Laparoscopic Gastrectomy Environment Setup node:
+    # Randomly arranges stomach, liver, pancreas, spleen, and 4 surgical
+    # lymph-node/artery targets at gastrectomy scale in Gazebo and RViz.
+    gastrectomy_env = Node(
+        package='ur5_endo_flex',
+        executable='gastrectomy_env_setup.py',
+        name='gastrectomy_env_setup',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'base_link': 'base_link',
+            'tip_link': 'endoscope_link',
+            'rcm_point_in_tip_frame': [0.0, 0.0, -0.30],
+            'endoscope_tip_in_link_frame': [0.0, 0.0, 0.20195],
+            'marker_topic': '/endoscope_markers',
+            'targets_topic': '/gastrectomy/targets_state',
+            'lga_cmd_topic': '/gastrectomy/lga_cmd',
+            'random_seed': random_seed,
+            'spawn_in_gazebo': True,
+            'breathing_freq_hz': 0.22,
+            'breathing_amp_m': 0.022,
         }],
     )
 
@@ -128,11 +188,13 @@ def generate_launch_description():
         'arm_tilt_vel_deg_s': 30.0,
         'flex_yaw_vel_rad_s': 0.5,
         'flex_curv_vel_1pm_s': 5.0,
+        'flex_arc_vel_m_s': 0.010,
         'control_tick_hz': 20.0,
+        'tracking_standoff_m': 0.105,
     }
 
-    # Integrated GUI control panel (default). Runs a single Ur5EndoFlexNode
-    # instance so /endoscope_markers and /joint_states have no duplicate publisher.
+    # Integrated GUI control panel (default). Runs a single 3-Level
+    # Ur5EndoFlexNode instance.
     control_panel_gui = Node(
         package='ur5_endo_flex',
         executable='control_panel_gui.py',
@@ -156,11 +218,15 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        SetEnvironmentVariable(name='PYTHONPATH', value=python_path),
         SetEnvironmentVariable(name='GZ_SIM_RESOURCE_PATH', value=gz_resource_path),
         launch_gui_arg,
+        random_seed_arg,
         sim,
+        rviz_node,
         camera_bridge,
         initial_pose,
+        gastrectomy_env,
         control_panel_gui,
         flex_state_publisher_headless,
     ])

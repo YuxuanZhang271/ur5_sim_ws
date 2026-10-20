@@ -42,9 +42,26 @@ Semi-auto:
                             axis until the endo_flex end (end_cylinder)
                             is 10 cm behind the fixed RCM point.
 
+Tracking:
+    Per-target GUI buttons engage a closed-loop hybrid RCM servo that keeps
+    the distal camera looking at the selected scene target while holding
+    tracking_standoff_m (default 10.5 cm) from it, following dynamic targets
+    continuously.  Tracking is only allowed in RCM mode (arm_mode == 'rcm',
+    RCM point captured) with flex_mode == 'fixed' (no-roll constraint);
+    otherwise the request is refused with a GUI-visible reason.
+    The servo is flex-primary: the endo_flex curvature takes all lateral /
+    aiming motion while the flex bend is below 50 deg, the UR5 RCM tilt/yaw
+    is smoothly recruited between 50-80 deg and takes over above 80 deg
+    (with an outward-bend lock).  Axial insertion depth always routes to the
+    arm.  The aim point is p_cam + standoff * R_end[:, 2] (the camera views
+    along the flex-end +z axis, i.e. -shaft while straight).
+    Any manual key cancels tracking; the STOP button disengages tracking and
+    holds the current state.  Disabling RCM mid-track auto-cancels tracking.
+
 Topics
 ------
     Sub : /joint_states          (UR joint positions from ros2_control)
+    Sub : <targets_topic>        String JSON scene target state
     Pub : <controller_topic>     JointTrajectory for arm
     Pub : /joint_states          JointState for the flex joints (RViz TF)
     Pub : /flex/base_yaw         Float64 for Gazebo base_yaw joint
@@ -54,6 +71,7 @@ Topics
     Pub : <marker_topic>         MarkerArray (visualization)
 """
 
+import json
 import math
 import threading
 
@@ -93,6 +111,24 @@ FLEX_TENDONS = [(0, 'R'), (90, 'G'), (180, 'B'), (270, 'Y')]
 BIRD_EYE_HORIZON_DEG = 30.0
 PULL_OUT_BEHIND_RCM_M = 0.10
 
+# Hybrid RCM target-tracking servo geometry (see endoscope_kinematics).
+# Effective bending length of the continuum: total arc minus one segment.
+TRACK_L_EFF = FLEX_ARC_MAX - FLEX_SEG_LEN          # 0.042 m
+# Shaft distance from endoscope tip (z=+0.20195) to flex_base_link (z=-0.398)
+# in the endoscope frame: 0.59995 m.
+TRACK_TIP_TO_FLEX_BASE = 0.59995
+# Absolute DLS damping scale (m^2). J is in [m] per [1/m, rad, m], so J^T J is
+# of order 1e-6..1e-2; the zone weights below are relative to this scale.
+TRACK_W_SCALE = 1e-6
+
+# GUI target-tracking buttons: (key, label, rgba color)
+TRACK_TARGETS = [
+    ('LN_No3',  'LN3 Red', (1.00, 0.15, 0.15, 0.96)),
+    ('LN_No4d', 'LN4d Grn', (0.12, 0.92, 0.25, 0.96)),
+    ('LN_No6',  'LN6 Blu', (0.15, 0.48, 1.00, 0.96)),
+    ('LGA_No7', 'LGA7 Dyn', (1.00, 0.86, 0.05, 0.98)),
+]
+
 
 class Ur5EndoFlexNode(Node):
     """Unified UR5 + endoscope + endo-flex control node."""
@@ -123,6 +159,10 @@ class Ur5EndoFlexNode(Node):
         self.declare_parameter('rcm_sphere_diameter', 0.03)
         self.declare_parameter('endoscope_line_width', 0.006)
         self.declare_parameter('endoscope_line_overshoot', 0.05)
+
+        # Target tracking
+        self.declare_parameter('tracking_standoff_m', 0.105)
+        self.declare_parameter('targets_topic', '/gastrectomy/targets_state')
 
         # Flex parameters (read-only here; used by the formulas)
         self.declare_parameter('flex_N', FLEX_N)
@@ -169,6 +209,10 @@ class Ur5EndoFlexNode(Node):
             self.get_parameter('endoscope_line_width').value)
         self.line_overshoot = float(
             self.get_parameter('endoscope_line_overshoot').value)
+
+        self.tracking_standoff = float(
+            self.get_parameter('tracking_standoff_m').value)
+        self.targets_topic = self.get_parameter('targets_topic').value
 
         self.arm_linear_vel = float(
             self.get_parameter('arm_linear_vel_m_s').value)
@@ -220,6 +264,17 @@ class Ur5EndoFlexNode(Node):
         # Active two-stage PULL OUT state machine (None when idle).
         self._pull_out_state = None
 
+        # Target tracking.  All fields below are protected by _state_lock.
+        self._track_target = None        # active target key or None
+        self._targets_state = {}         # key -> np.array(3,) pos_base
+        self._track_warned = False       # missing-target warn already issued
+        self._track_locked = False       # servo converged and holding
+        self._track_dist_m = None        # camera->target distance (m)
+        self._track_aim_deg = None       # camera-axis aim error (deg)
+        self._track_zone = None          # last WDLS zone (1/2/3) or None
+        self._track_status_msg = None    # transient refusal reason for GUI
+        self._targets_logged = False     # first targets-state receipt logged
+
         # Continuous-control key state (keyboard + GUI buttons share this)
         self._key_lock = threading.Lock()
         self._key_state = {
@@ -266,6 +321,13 @@ class Ur5EndoFlexNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST)
         self.create_subscription(
             String, '/robot_description', self._robot_description_cb, urdf_qos)
+
+        targets_qos = QoSProfile(
+            depth=10, reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST)
+        self.create_subscription(
+            String, self.targets_topic, self._targets_state_cb, targets_qos)
 
         marker_qos = QoSProfile(
             depth=10, reliability=QoSReliabilityPolicy.RELIABLE,
@@ -328,6 +390,31 @@ class Ur5EndoFlexNode(Node):
         if self.kin.chain is None and msg.data:
             self.kin.setup_from_urdf(msg.data)
 
+    def _targets_state_cb(self, msg: String):
+        """Update known scene-target positions from the JSON target state."""
+        try:
+            data = json.loads(msg.data)
+            targets = data.get('targets', {})
+            parsed = {}
+            for key, _, _ in TRACK_TARGETS:
+                t = targets.get(key)
+                if t is None:
+                    continue
+                parsed[key] = np.array(t['pos_base'], dtype=float)
+        except Exception as e:
+            self.get_logger().warn(
+                f'Failed to parse targets state: {e}',
+                throttle_duration_sec=2.0)
+            return
+
+        with self._state_lock:
+            self._targets_state.update(parsed)
+            log_first = bool(parsed) and not self._targets_logged
+            if log_first:
+                self._targets_logged = True
+        if log_first:
+            self.get_logger().info('targets state received: 4 targets')
+
     # ==================================================================
     # Continuous control tick (called by timer at ~control_tick_hz)
     # ==================================================================
@@ -345,9 +432,20 @@ class Ur5EndoFlexNode(Node):
                 pull_out_active = False
                 self.get_logger().info(
                     'PULL OUT cancelled by manual key input.')
+            tracking_active = self._track_target is not None
+            if tracking_active and any_manual_key:
+                self._track_target = None
+                tracking_active = False
+                self.get_logger().info(
+                    'TRACKING cancelled by manual key input.')
 
         if pull_out_active:
             self._step_pull_out()
+            self._publish_flex_joint_states()
+            return
+
+        if tracking_active:
+            self._step_hybrid_rcm_tracking()
             self._publish_flex_joint_states()
             return
 
@@ -628,6 +726,7 @@ class Ur5EndoFlexNode(Node):
     def toggle_arm_mode(self):
         with self._state_lock:
             self._pull_out_state = None
+            tracking_was_active = self._track_target is not None
             if self.arm_mode == 'linear':
                 self.arm_mode = 'rcm'
                 self._capture_rcm_unlocked()
@@ -638,6 +737,11 @@ class Ur5EndoFlexNode(Node):
                 self.rcm_ref_axis = None
                 self.rcm_ref_depth = None
                 self.get_logger().info('Arm mode -> linear (RCM disabled).')
+                if tracking_was_active:
+                    self._track_target = None
+                    self._track_zone = None
+                    self.get_logger().warn(
+                        'TRACKING auto-cancelled: RCM mode disabled.')
 
     def _capture_rcm_unlocked(self):
         """Enable RCM (must be called with _state_lock held)."""
@@ -655,6 +759,11 @@ class Ur5EndoFlexNode(Node):
         with self._state_lock:
             self.flex_mode = 'free' if self.flex_mode == 'fixed' else 'fixed'
             mode = self.flex_mode
+            if mode != 'fixed' and self._track_target is not None:
+                self._track_target = None
+                self._track_zone = None
+                self.get_logger().warn(
+                    'TRACKING auto-cancelled: flex mode left fixed.')
         self._publish_flex_joint_states()
         self.get_logger().info(f'Flex mode -> {mode}.')
 
@@ -678,11 +787,17 @@ class Ur5EndoFlexNode(Node):
         """RESET: HOME + arm_mode=linear, flex_mode=fixed; clear RCM."""
         with self._state_lock:
             self._pull_out_state = None
+            tracking_was_active = self._track_target is not None
+            self._track_target = None
+            self._track_zone = None
             self.arm_mode = 'linear'
             self.flex_mode = 'fixed'
             self.rcm_enabled = False
             self.rcm_ref_axis = None
             self.rcm_ref_depth = None
+        if tracking_was_active:
+            self.get_logger().warn(
+                'TRACKING auto-cancelled: RESET disabled RCM mode.')
         self.cmd_home()
 
     def cmd_bird_eye_view(self):
@@ -727,6 +842,7 @@ class Ur5EndoFlexNode(Node):
             ref_axis = (None if self.rcm_ref_axis is None
                         else self.rcm_ref_axis.copy())
             q_now = self.joint_positions.copy()
+            self._track_target = None
 
         if not (rcm_on and rcm_pt is not None and ref_axis is not None):
             self.get_logger().warn(
@@ -866,6 +982,298 @@ class Ur5EndoFlexNode(Node):
                 self.get_logger().info(
                     f'PULL OUT complete: endo_flex end is '
                     f'{s_end_cur * 100.0:.1f} cm behind fixed RCM point.')
+
+    # ==================================================================
+    # Target tracking (hybrid flex-primary RCM servo, one tick per call)
+    # ==================================================================
+    def start_tracking(self, key):
+        """Engage closed-loop hybrid RCM tracking of a scene target by key.
+
+        Refused (with a GUI-visible reason) unless the arm is in RCM mode
+        with a captured RCM point and the flex is in 'fixed' mode (the
+        no-roll constraint of the continuum).
+        """
+        if key not in {k for k, _, _ in TRACK_TARGETS}:
+            self.get_logger().warn(f'Unknown tracking target: {key}')
+            return
+
+        refusal = None
+        with self._state_lock:
+            rcm_ok = (self.arm_mode == 'rcm' and self.rcm_enabled
+                      and self.rcm_world_point is not None)
+            if not rcm_ok or self.flex_mode != 'fixed':
+                refusal = 'requires RCM mode (Ctrl+M) + fixed flex mode'
+                self._track_status_msg = refusal
+            else:
+                self._pull_out_state = None
+                self._track_target = key
+                self._track_locked = False
+                self._track_warned = False
+                self._track_dist_m = None
+                self._track_aim_deg = None
+                self._track_zone = None
+                self._track_status_msg = None
+                has_state = bool(self._targets_state)
+
+        if refusal is not None:
+            self.get_logger().warn(
+                f'TRACKING refused for {key}: {refusal}.')
+            return
+
+        self.get_logger().info(
+            f'TRACKING started: {key} '
+            f'(standoff {self.tracking_standoff * 100.0:.1f} cm)')
+        if not has_state:
+            self.get_logger().info(
+                f'TRACKING will engage when {self.targets_topic} arrives.')
+
+    def stop_tracking(self):
+        """Stop tracking and hold the current arm/flex state."""
+        with self._state_lock:
+            if self._track_target is None:
+                return
+            self._track_target = None
+            self._track_zone = None
+        self.get_logger().info('TRACKING stopped; holding current state.')
+
+    @staticmethod
+    def _wdls_solve(J, e_vec, w_rel):
+        """Weighted damped least squares step (None when singular)."""
+        W = TRACK_W_SCALE * np.diag(np.asarray(w_rel, dtype=float))
+        A = J.T @ J + W
+        try:
+            return np.linalg.solve(A, J.T @ e_vec)
+        except (np.linalg.LinAlgError, ValueError):
+            return None
+
+    def _step_hybrid_rcm_tracking(self):
+        """Execute one 20 Hz tick of the hybrid RCM tracking servo.
+
+        Control variables u = (kappa_x, kappa_y, theta_tilt, theta_yaw,
+        d_ins).  The task is the virtual aim point p_aim = p_cam +
+        standoff * v_hat with v_hat = R_end[:, 2]; driving p_aim onto the
+        target achieves look-at and the standoff distance simultaneously.
+        Zone weights keep endo_flex primary and recruit the UR5 RCM arm
+        only as the bend approaches saturation.
+        """
+        if not self._arm_ready():
+            return
+
+        with self._state_lock:
+            key = self._track_target
+            if key is None:
+                return
+            p_target = (None if key not in self._targets_state
+                        else self._targets_state[key].copy())
+            arm_mode = self.arm_mode
+            rcm_on = self.rcm_enabled
+            rcm_pt = (None if self.rcm_world_point is None
+                      else self.rcm_world_point.copy())
+            ref_axis = (None if self.rcm_ref_axis is None
+                        else self.rcm_ref_axis.copy())
+            q_now = self.joint_positions.copy()
+            kappa = float(self.flex_curvature)
+            steer_yaw = float(self.flex_steer_yaw)
+            arc_len = float(self.flex_arc_len)
+            flex_mode = self.flex_mode
+            standoff = float(self.tracking_standoff)
+            already_warned = self._track_warned
+            if p_target is None and not already_warned:
+                self._track_warned = True
+
+        # RCM (and fixed flex) are prerequisites: mid-track loss auto-cancels.
+        if not (arm_mode == 'rcm' and rcm_on and rcm_pt is not None
+                and ref_axis is not None):
+            with self._state_lock:
+                self._track_target = None
+                self._track_zone = None
+            self.get_logger().warn(
+                'TRACKING auto-cancelled: RCM mode is no longer active.')
+            return
+        if flex_mode != 'fixed':
+            with self._state_lock:
+                self._track_target = None
+                self._track_zone = None
+            self.get_logger().warn(
+                'TRACKING auto-cancelled: flex mode is no longer fixed.')
+            return
+
+        if p_target is None:
+            if not already_warned:
+                self.get_logger().warn(
+                    f"TRACKING waiting for target '{key}' on "
+                    f'{self.targets_topic}.')
+            return
+
+        # ---- Control-space FK (no arm IK) ----
+        try:
+            R_shaft, _ = self.kin.fk_matrix(q_now)
+            _, _, p_tip = self.kin.tube_axis_in_base(q_now)
+            d_ins = float(np.linalg.norm(p_tip - rcm_pt))
+            p_cam, v_hat = self.kin.camera_pose_on_shaft(
+                rcm_pt, R_shaft, d_ins, kappa, steer_yaw,
+                arc_len=arc_len, flex_mode=flex_mode,
+                tip_to_flex_base=TRACK_TIP_TO_FLEX_BASE)
+        except Exception as e:
+            self.get_logger().warn(
+                f'TRACKING FK failed: {e}', throttle_duration_sec=2.0)
+            return
+
+        p_aim = p_cam + standoff * v_hat
+        e_vec = p_target - p_aim
+        err_norm = float(np.linalg.norm(e_vec))
+
+        aim_vec = p_target - p_cam
+        aim_norm = float(np.linalg.norm(aim_vec))
+        if aim_norm > 1e-9:
+            cos_aim = float(np.clip(
+                np.dot(v_hat, aim_vec / aim_norm), -1.0, 1.0))
+            aim_deg = math.degrees(math.acos(cos_aim))
+        else:
+            aim_deg = 0.0
+        dist_m = float(np.linalg.norm(p_cam - p_target))
+
+        # ---- Zone schedule on the current flex bend ----
+        theta_total = min(FLEX_MAX_BEND, TRACK_L_EFF * kappa)
+        theta_deg = math.degrees(theta_total)
+        if theta_deg <= 50.0:
+            zone = 1
+            w_rel = np.array([1.0, 1.0, 1e6, 1e6, 1.0])
+        elif theta_deg < 80.0:
+            zone = 2
+            s = (theta_deg - 50.0) / 30.0
+            w_flex = 1.0 + 20.0 * s * s
+            w_tilt = 1.0 + (1e6 - 1.0) * (1.0 - s) ** 2
+            w_rel = np.array([w_flex, w_flex, w_tilt, w_tilt, 1.0])
+        else:
+            zone = 3
+            w_rel = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+
+        max_dkappa = self.flex_curv_vel * self.dt
+        max_dpsi = self.flex_yaw_vel * self.dt
+        max_dtilt = self.arm_tilt_vel * self.dt
+        max_dins = self.arm_axis_vel * self.dt
+
+        # ---- WDLS primary solve ----
+        if err_norm < 1e-12:
+            du = np.zeros(5, dtype=float)
+        else:
+            try:
+                J = self.kin.hybrid_rcm_jacobian(
+                    rcm_pt, R_shaft, d_ins, kappa, steer_yaw, standoff,
+                    arc_len=arc_len, flex_mode=flex_mode,
+                    tip_to_flex_base=TRACK_TIP_TO_FLEX_BASE)
+            except Exception as e:
+                self.get_logger().warn(
+                    f'TRACKING Jacobian failed: {e}',
+                    throttle_duration_sec=2.0)
+                return
+            du = self._wdls_solve(J, e_vec, w_rel)
+            if du is None:
+                self.get_logger().warn(
+                    'TRACKING WDLS singular; skipping tick.',
+                    throttle_duration_sec=2.0)
+                return
+
+            # Zone 3: lock outward bending (inward unbending stays flex-first).
+            if zone == 3:
+                kx0 = kappa * math.cos(steer_yaw)
+                ky0 = kappa * math.sin(steer_yaw)
+                kappa_solved = math.hypot(kx0 + du[0], ky0 + du[1])
+                if kappa_solved > kappa + 1e-12:
+                    w_lock = w_rel.copy()
+                    w_lock[0] = 1e4
+                    w_lock[1] = 1e4
+                    du_lock = self._wdls_solve(J, e_vec, w_lock)
+                    if du_lock is None:
+                        self.get_logger().warn(
+                            'TRACKING WDLS singular (outward lock); '
+                            'skipping tick.', throttle_duration_sec=2.0)
+                        return
+                    du = du_lock
+
+            # ---- Null-space recentering above 55 deg (low gain) ----
+            if theta_total > math.radians(55.0) and kappa > 1e-9:
+                J_pinv = np.linalg.pinv(J)
+                N_null = np.eye(5) - J_pinv @ J
+                g = np.zeros(5, dtype=float)
+                g_flex = -TRACK_L_EFF * (theta_total - math.radians(45.0))
+                g[0] = g_flex * math.cos(steer_yaw)
+                g[1] = g_flex * math.sin(steer_yaw)
+                du = du - 0.1 * (N_null @ g)
+
+        # ---- Hard clamps ----
+        kx0 = kappa * math.cos(steer_yaw)
+        ky0 = kappa * math.sin(steer_yaw)
+        kappa_u = math.hypot(kx0 + du[0], ky0 + du[1])
+        if kappa_u > 1e-12:
+            psi_u = math.atan2(ky0 + du[1], kx0 + du[0])
+        else:
+            psi_u = steer_yaw
+        d_kappa = float(np.clip(kappa_u - kappa, -max_dkappa, max_dkappa))
+        d_psi = float(np.clip(
+            (psi_u - steer_yaw + math.pi) % (2.0 * math.pi) - math.pi,
+            -max_dpsi, max_dpsi))
+        kappa_new = float(np.clip(
+            kappa + d_kappa, 0.0, FLEX_MAX_BEND / TRACK_L_EFF))
+        if kappa_new < 1e-6:
+            psi_new = steer_yaw
+        else:
+            psi_new = (steer_yaw + d_psi + math.pi) % (2.0 * math.pi) - math.pi
+
+        d_tilt = float(np.clip(du[2], -max_dtilt, max_dtilt))
+        d_yaw = float(np.clip(du[3], -max_dtilt, max_dtilt))
+        d_ins_step = float(np.clip(du[4], -max_dins, max_dins))
+
+        # ---- RCM cone guard: freeze the arm, keep the flex moving ----
+        R_shaft_new = self.kin.rotate_shaft_frame(
+            R_shaft, d_tilt=d_tilt, d_yaw=d_yaw)
+        u_new = R_shaft_new[:, 2]
+        cos_cone = float(np.clip(np.dot(u_new, ref_axis), -1.0, 1.0))
+        cone_deg = math.degrees(math.acos(cos_cone))
+        if cone_deg > math.degrees(self.rcm_cone_half_angle):
+            if abs(d_tilt) + abs(d_yaw) > 1e-12:
+                self.get_logger().warn(
+                    f'TRACKING RCM cone limit ({cone_deg:.1f} deg > '
+                    f'{math.degrees(self.rcm_cone_half_angle):.1f} deg); '
+                    f'arm frozen for this tick.',
+                    throttle_duration_sec=2.0)
+            d_tilt = 0.0
+            d_yaw = 0.0
+            u_new = R_shaft[:, 2].copy()
+
+        # ---- Apply flex ----
+        with self._state_lock:
+            self.flex_curvature = kappa_new
+            if kappa_new >= 1e-6:
+                self.flex_steer_yaw = float(psi_new)
+
+        # ---- Apply arm (only when the RCM coordinates changed) ----
+        if abs(d_tilt) + abs(d_yaw) + abs(d_ins_step) > 1e-9:
+            d_new = d_ins + d_ins_step
+            p_tip_target = rcm_pt + d_new * u_new
+            q_target = self.kin.ik_with_rcm(p_tip_target, rcm_pt, q_now)
+            if q_target is None:
+                self.get_logger().warn(
+                    'TRACKING IK failed; arm skipped this tick '
+                    '(flex still applied).', throttle_duration_sec=2.0)
+            else:
+                q_target = self._auto_solve_wrist1(q_target)
+                self._send_trajectory(q_target, traj_duration=self.dt)
+
+        # ---- GUI / marker telemetry ----
+        locked = (aim_deg < 0.5 and abs(dist_m - standoff) < 0.0015)
+        with self._state_lock:
+            self._track_dist_m = dist_m
+            self._track_aim_deg = aim_deg
+            self._track_zone = zone
+            newly_locked = locked and not self._track_locked
+            if locked:
+                self._track_locked = True
+        if newly_locked:
+            self.get_logger().info(
+                f'TRACKING locked on {key}: d={dist_m * 100.0:.1f} cm, '
+                f'aim={aim_deg:.2f} deg.')
 
     # ==================================================================
     # Key state (used by keyboard listener AND GUI button bindings)
@@ -1026,6 +1434,14 @@ class Ur5EndoFlexNode(Node):
             ref_axis = (None if self.rcm_ref_axis is None
                         else self.rcm_ref_axis.copy())
             ref_depth = self.rcm_ref_depth
+            track_key = self._track_target
+            track_pos = (None if track_key is None
+                         or track_key not in self._targets_state
+                         else self._targets_state[track_key].copy())
+            flex_curvature = self.flex_curvature
+            flex_steer_yaw = self.flex_steer_yaw
+            flex_arc_len = self.flex_arc_len
+            flex_mode = self.flex_mode
 
         try:
             axis, p_rcm_fk, p_tip_world = self.kin.tube_axis_in_base(q)
@@ -1143,6 +1559,72 @@ class Ur5EndoFlexNode(Node):
             ma.markers.append(self._make_delete_marker('rcm_cone', 2, stamp))
             ma.markers.append(self._make_delete_marker('rcm_cone', 3, stamp))
 
+        # 3. Target tracking: sight-line camera -> target and status text.
+        track_rgba = None
+        if track_key is not None:
+            for t_key, _t_label, t_rgba in TRACK_TARGETS:
+                if t_key == track_key:
+                    track_rgba = t_rgba
+                    break
+
+        p_cam = None
+        if (track_key is not None and track_pos is not None
+                and track_rgba is not None):
+            try:
+                _, p_cam, _ = self.kin.flex_fk_in_base(
+                    q, curvature=flex_curvature, steer_yaw=flex_steer_yaw,
+                    arc_len=flex_arc_len, flex_mode=flex_mode)
+            except Exception as e:
+                self.get_logger().warn(
+                    f'TRACKING FK failed in marker publish: {e}',
+                    throttle_duration_sec=2.0)
+                p_cam = None
+
+        if p_cam is not None:
+            sight = Marker()
+            sight.header.frame_id = self.base_link
+            sight.header.stamp = stamp
+            sight.ns = 'tracking_sightline'
+            sight.id = 5
+            sight.type = Marker.LINE_STRIP
+            sight.action = Marker.ADD
+            sight.scale.x = self.line_width * 1.5
+            sight.color = ColorRGBA(
+                r=float(track_rgba[0]), g=float(track_rgba[1]),
+                b=float(track_rgba[2]), a=float(track_rgba[3]))
+            sight.pose.orientation.w = 1.0
+            sight.points = [
+                Point(x=float(p_cam[0]), y=float(p_cam[1]),
+                      z=float(p_cam[2])),
+                Point(x=float(track_pos[0]), y=float(track_pos[1]),
+                      z=float(track_pos[2])),
+            ]
+            ma.markers.append(sight)
+
+            d_track = float(np.linalg.norm(p_cam - track_pos))
+            track_status = Marker()
+            track_status.header.frame_id = self.base_link
+            track_status.header.stamp = stamp
+            track_status.ns = 'status'
+            track_status.id = 101
+            track_status.type = Marker.TEXT_VIEW_FACING
+            track_status.action = Marker.ADD
+            track_status.pose.position.x = float(p_cam[0])
+            track_status.pose.position.y = float(p_cam[1])
+            track_status.pose.position.z = float(p_cam[2] + 0.05)
+            track_status.pose.orientation.w = 1.0
+            track_status.scale.z = 0.02
+            track_status.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.95)
+            track_status.text = (
+                f'TRACKING {track_key}: d={d_track * 100.0:.1f} cm')
+            ma.markers.append(track_status)
+        else:
+            # Not tracking (or target not received yet): hide tracking markers.
+            ma.markers.append(
+                self._make_delete_marker('tracking_sightline', 5, stamp))
+            ma.markers.append(
+                self._make_delete_marker('status', 101, stamp))
+
         self.marker_pub.publish(ma)
 
     def _build_cone_marker(self, apex, direction, length, half_angle,
@@ -1228,6 +1710,12 @@ class Ur5EndoFlexNode(Node):
                 'flex_theta_total_deg': math.degrees(theta_total),
                 'flex_theta_seg_deg': math.degrees(
                     theta_total / (FLEX_N - 1)),
+                'tracking': self._track_target,
+                'tracking_dist_m': self._track_dist_m,
+                'tracking_aim_deg': self._track_aim_deg,
+                'tracking_zone': self._track_zone,
+                'tracking_locked': self._track_locked,
+                'tracking_refusal': self._track_status_msg,
             }
             alpha = self.flex_base_yaw + self.flex_ext_yaw
             tendons = {}

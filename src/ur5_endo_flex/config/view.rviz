@@ -6,11 +6,13 @@ Panels:
         - /Global Options1
         - /RobotModel1
         - /TF1
-        - /MarkerArray1
+        - /EndoscopeMarkers1
         - /EndoscopeCamera1
       Splitter Ratio: 0.5
-    Tree Height: 400
+    Tree Height: 705
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
     Splitter Ratio: 0.5
 Visualization Manager:
@@ -21,9 +23,6 @@ Visualization Manager:
       Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
       Enabled: true
-      Line Style:
-        Line Width: 0.03
-        Value: Lines
       Name: Grid
       Normal Cell Count: 0
       Offset:
@@ -51,85 +50,31 @@ Visualization Manager:
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
-        Link Tree Style: Links in Alphabetic Order
       Name: RobotModel
       TF Prefix: ""
       Update Interval: 0
       Value: true
+      Visual Enabled: true
     - Class: rviz_default_plugins/TF
       Enabled: true
-      Filter (blacklist): ""
-      Filter (whitelist): end_cylinder
       Frame Timeout: 15
       Frames:
         All Enabled: false
         base:
           Value: false
+        base_inertia:
+          Value: false
         base_link:
-          Value: false
+          Value: true
         base_link_inertia:
-          Value: false
-        camera_link:
-          Value: false
-        camera_optical_frame:
           Value: false
         end_cylinder:
           Value: true
-        endoscope_base:
+        endoscope_camera_link:
           Value: false
-        endoscope_base_link:
+        endoscope_camera_optical_frame:
           Value: false
         endoscope_link:
-          Value: false
-        endoscope_mount:
-          Value: false
-        endoscope_mount_link:
-          Value: false
-        endoscope_tip:
-          Value: false
-        endoscope_tip_link:
-          Value: false
-        ext_pitch_mid_1:
-          Value: false
-        ext_pitch_mid_2:
-          Value: false
-        ext_pitch_mid_3:
-          Value: false
-        ext_pitch_mid_4:
-          Value: false
-        ext_pitch_mid_5:
-          Value: false
-        ext_pitch_mid_6:
-          Value: false
-        ext_pitch_mid_7:
-          Value: false
-        ext_yaw_back_mid_1:
-          Value: false
-        ext_yaw_back_mid_2:
-          Value: false
-        ext_yaw_back_mid_3:
-          Value: false
-        ext_yaw_back_mid_4:
-          Value: false
-        ext_yaw_back_mid_5:
-          Value: false
-        ext_yaw_back_mid_6:
-          Value: false
-        ext_yaw_back_mid_7:
-          Value: false
-        ext_yaw_mid_1:
-          Value: false
-        ext_yaw_mid_2:
-          Value: false
-        ext_yaw_mid_3:
-          Value: false
-        ext_yaw_mid_4:
-          Value: false
-        ext_yaw_mid_5:
-          Value: false
-        ext_yaw_mid_6:
-          Value: false
-        ext_yaw_mid_7:
           Value: false
         flange:
           Value: false
@@ -137,139 +82,102 @@ Visualization Manager:
           Value: false
         forearm_link:
           Value: false
-        ft_frame:
+        robot_supporter:
           Value: false
-        rcm_link:
+        seg_1:
           Value: false
-        segment_1:
+        seg_1_after_pitch:
           Value: false
-        segment_2:
+        seg_1_after_yaw:
           Value: false
-        segment_3:
+        seg_1_tip:
           Value: false
-        segment_4:
+        seg_2:
           Value: false
-        segment_5:
+        seg_2_after_pitch:
           Value: false
-        segment_6:
+        seg_2_after_yaw:
           Value: false
-        segment_7:
+        seg_2_tip:
           Value: false
-        segment_8:
+        seg_3:
+          Value: false
+        seg_3_after_pitch:
+          Value: false
+        seg_3_after_yaw:
+          Value: false
+        seg_3_tip:
+          Value: false
+        seg_4:
+          Value: false
+        seg_4_after_pitch:
+          Value: false
+        seg_4_after_yaw:
+          Value: false
+        seg_4_tip:
+          Value: false
+        seg_5:
+          Value: false
+        seg_5_after_pitch:
+          Value: false
+        seg_5_after_yaw:
+          Value: false
+        seg_5_tip:
+          Value: false
+        seg_6:
+          Value: false
+        seg_6_after_pitch:
+          Value: false
+        seg_6_after_yaw:
+          Value: false
+        seg_6_tip:
+          Value: false
+        seg_7:
+          Value: false
+        seg_7_after_pitch:
+          Value: false
+        seg_7_after_yaw:
+          Value: false
+        seg_7_tip:
           Value: false
         shoulder_link:
           Value: false
         start_cylinder:
-          Value: false
-        supporter_link:
-          Value: false
-        tendon_0_end:
-          Value: false
-        tendon_0_s1:
-          Value: false
-        tendon_0_s2:
-          Value: false
-        tendon_0_s3:
-          Value: false
-        tendon_0_s4:
-          Value: false
-        tendon_0_s5:
-          Value: false
-        tendon_0_s6:
-          Value: false
-        tendon_0_s7:
-          Value: false
-        tendon_0_s8:
-          Value: false
-        tendon_180_end:
-          Value: false
-        tendon_180_s1:
-          Value: false
-        tendon_180_s2:
-          Value: false
-        tendon_180_s3:
-          Value: false
-        tendon_180_s4:
-          Value: false
-        tendon_180_s5:
-          Value: false
-        tendon_180_s6:
-          Value: false
-        tendon_180_s7:
-          Value: false
-        tendon_180_s8:
-          Value: false
-        tendon_270_end:
-          Value: false
-        tendon_270_s1:
-          Value: false
-        tendon_270_s2:
-          Value: false
-        tendon_270_s3:
-          Value: false
-        tendon_270_s4:
-          Value: false
-        tendon_270_s5:
-          Value: false
-        tendon_270_s6:
-          Value: false
-        tendon_270_s7:
-          Value: false
-        tendon_270_s8:
-          Value: false
-        tendon_90_end:
-          Value: false
-        tendon_90_s1:
-          Value: false
-        tendon_90_s2:
-          Value: false
-        tendon_90_s3:
-          Value: false
-        tendon_90_s4:
-          Value: false
-        tendon_90_s5:
-          Value: false
-        tendon_90_s6:
-          Value: false
-        tendon_90_s7:
-          Value: false
-        tendon_90_s8:
-          Value: false
+          Value: true
         tool0:
           Value: false
         upper_arm_link:
           Value: false
         world:
-          Value: false
+          Value: true
         wrist_1_link:
           Value: false
         wrist_2_link:
           Value: false
         wrist_3_link:
           Value: false
-        yaw_base:
-          Value: false
-      Marker Alpha: 1
-      Marker Scale: 0.08
+      Marker Scale: 0.25
       Name: TF
       Show Arrows: false
       Show Axes: true
       Show Names: true
-      Tree:
-        {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: MarkerArray
+      Name: EndoscopeMarkers
       Namespaces:
-        axis_drift: true
         endoscope_current_axis: true
         endoscope_line: true
+        gastrectomy_anatomy: true
+        gastrectomy_labels: true
+        gastrectomy_targets: true
         rcm_cone: true
         rcm_point: true
+        status: true
+        tracking_sightline: true
       Topic:
-        Depth: 5
+        Depth: 10
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
@@ -286,7 +194,6 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
-        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /endoscope_camera/image_raw
@@ -312,35 +219,34 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.5
+      Distance: 2.66
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.06
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.0
-        Y: 0.0
+        X: 0
+        Y: 0
         Z: 0.8
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.01
-      Pitch: 0.4
+      Pitch: 0.40
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 1.2
+      Yaw: 0.80
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 1011
+  EndoscopeCamera:
+    collapsed: false
+  Height: 960
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: ""
-  Views:
-    collapsed: false
-  Width: 1854
-  X: 66
-  Y: 32
+  Width: 1400
+  X: 60
+  Y: 60
