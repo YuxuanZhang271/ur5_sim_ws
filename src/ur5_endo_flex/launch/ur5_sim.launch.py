@@ -122,7 +122,7 @@ def generate_launch_description():
     # (and therefore RViz) reflects the home configuration on first load.
     initial_pose = Node(
         package='ur5_endo_flex',
-        executable='initial_pose_publisher.py',
+        executable='home_pose_publisher.py',
         name='initial_pose_publisher',
         output='screen',
         parameters=[{
@@ -138,7 +138,7 @@ def generate_launch_description():
     # lymph-node/artery targets at gastrectomy scale in Gazebo and RViz.
     gastrectomy_env = Node(
         package='ur5_endo_flex',
-        executable='gastrectomy_env_setup.py',
+        executable='scene_setup.py',
         name='gastrectomy_env_setup',
         output='screen',
         parameters=[{
@@ -183,21 +183,23 @@ def generate_launch_description():
         'flex_ARC_MAX': 0.050,
         'flex_TENDON_R': 0.004,
         # Continuous-control velocity limits
-        'arm_linear_vel_m_s': 0.050,          # 50 mm/s
-        'arm_axis_vel_m_s':  0.050,           # 50 mm/s along tube
-        'arm_tilt_vel_deg_s': 30.0,
-        'flex_yaw_vel_rad_s': 0.5,
-        'flex_curv_vel_1pm_s': 5.0,
-        'flex_arc_vel_m_s': 0.010,
+        # NOTE: these override the node's declare_parameter defaults, so the
+        # two places must be kept in sync.
+        'arm_linear_vel_m_s': 0.025,          # 25 mm/s
+        'arm_axis_vel_m_s':  0.025,           # 25 mm/s along tube
+        'arm_tilt_vel_deg_s': 4.0,
+        'flex_yaw_vel_rad_s': 1.0,
+        'flex_curv_vel_1pm_s': 10.0,
+        'flex_arc_vel_m_s': 0.020,
         'control_tick_hz': 20.0,
         'tracking_standoff_m': 0.105,
     }
 
     # Integrated GUI control panel (default). Runs a single 3-Level
     # Ur5EndoFlexNode instance.
-    control_panel_gui = Node(
+    gui_panel = Node(
         package='ur5_endo_flex',
-        executable='control_panel_gui.py',
+        executable='gui_panel.py',
         name='ur5_endo_flex_control_panel',
         output='screen',
         parameters=[shared_node_params],
@@ -207,7 +209,7 @@ def generate_launch_description():
     # Fallback headless node when launch_gui:=false.
     flex_state_publisher_headless = Node(
         package='ur5_endo_flex',
-        executable='ur5_endo_flex_node.py',
+        executable='robot_node.py',
         name='ur5_endo_flex_node_headless',
         output='screen',
         parameters=[{
@@ -227,6 +229,6 @@ def generate_launch_description():
         camera_bridge,
         initial_pose,
         gastrectomy_env,
-        control_panel_gui,
+        gui_panel,
         flex_state_publisher_headless,
     ])

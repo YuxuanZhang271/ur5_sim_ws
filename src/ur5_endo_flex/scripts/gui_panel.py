@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-control_panel_gui.py — Compact Tkinter control panel for ur5_endo_flex.
+gui_panel.py — Compact Tkinter control panel for ur5_endo_flex.
 
 Compact Layout (~580x530 default, expandable):
     Row 0:  Top toolbar (HOME, RESET, BIRD-EYE, PULL OUT)
@@ -18,7 +18,7 @@ from rclpy.executors import SingleThreadedExecutor
 import tkinter as tk
 from tkinter import ttk
 
-from ur5_endo_flex_node import (
+from robot_node import (
     Ur5EndoFlexNode, FLEX_TENDONS, TRACK_TARGETS)
 
 

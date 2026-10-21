@@ -9,14 +9,11 @@ install(
 )
 
 install(
-  PROGRAMS scripts/initial_pose_publisher.py
-           scripts/endoscope_kinematics.py
-           scripts/gastrectomy_env_setup.py
-           scripts/ur5_endo_flex_level1_io.py
-           scripts/ur5_endo_flex_level2_cmd.py
-           scripts/ur5_endo_flex_level3_intelligent.py
-           scripts/ur5_endo_flex_node.py
-           scripts/control_panel_gui.py
+  PROGRAMS scripts/home_pose_publisher.py
+           scripts/kinematics.py
+           scripts/scene_setup.py
+           scripts/robot_node.py
+           scripts/gui_panel.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

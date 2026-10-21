@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gastrectomy_env_setup.py — Launch-time Laparoscopic Gastrectomy Environment
+scene_setup.py — Launch-time Laparoscopic Gastrectomy Environment
 Generator & Synchronizer for Gazebo Sim (`gz-sim`) and RViz.
 
 Features:
@@ -62,7 +62,7 @@ from std_msgs.msg import String, Empty, ColorRGBA, Float64
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
 
-from endoscope_kinematics import EndoscopeKinematics, HOME_DEG
+from kinematics import EndoscopeKinematics, HOME_DEG
 
 
 # Canonical target keys and display metadata

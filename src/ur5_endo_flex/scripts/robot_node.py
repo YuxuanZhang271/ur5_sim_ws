@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ur5_endo_flex_node.py — unified ROS 2 control node for the integrated
+robot_node.py — unified ROS 2 control node for the integrated
 UR5 + endoscope + endo-flex continuum system.
 
 Arm (ur5_endoscope side):
@@ -95,7 +95,7 @@ try:
 except Exception:
     HAS_PYNPUT = False
 
-from endoscope_kinematics import (
+from kinematics import (
     EndoscopeKinematics, JOINT_NAMES, HOME_DEG,
 )
 
@@ -108,10 +108,13 @@ FLEX_ARC_MAX = 0.050
 FLEX_MAX_BEND = math.pi / 2.0
 FLEX_TENDON_R = 0.004
 FLEX_TENDONS = [(0, 'R'), (90, 'G'), (180, 'B'), (270, 'Y')]
+# Curvature tolerance (1/m) below which the flex is considered straight for
+# sequencing gates such as PULL OUT retraction.
+FLEX_STRAIGHT_KAPPA_TOL = 1e-3
 BIRD_EYE_HORIZON_DEG = 30.0
 PULL_OUT_BEHIND_RCM_M = 0.10
 
-# Hybrid RCM target-tracking servo geometry (see endoscope_kinematics).
+# Hybrid RCM target-tracking servo geometry (see kinematics).
 # Effective bending length of the continuum: total arc minus one segment.
 TRACK_L_EFF = FLEX_ARC_MAX - FLEX_SEG_LEN          # 0.042 m
 # Shaft distance from endoscope tip (z=+0.20195) to flex_base_link (z=-0.398)
@@ -120,6 +123,13 @@ TRACK_TIP_TO_FLEX_BASE = 0.59995
 # Absolute DLS damping scale (m^2). J is in [m] per [1/m, rad, m], so J^T J is
 # of order 1e-6..1e-2; the zone weights below are relative to this scale.
 TRACK_W_SCALE = 1e-6
+# Over-bend recovery: a tracking task that starts with the flex already bent
+# beyond TRACK_RECOVER_BEND_DEG first unwinds the flex (arm held still) down
+# to TRACK_RECOVER_DONE_DEG before resuming normal hybrid tracking.  These
+# thresholds straddle the zone schedule (50/80 deg) and the null-space
+# recentering threshold (55 deg -> 45 deg).
+TRACK_RECOVER_BEND_DEG = 55.0
+TRACK_RECOVER_DONE_DEG = 50.0
 
 # GUI target-tracking buttons: (key, label, rgba color)
 TRACK_TARGETS = [
@@ -172,12 +182,14 @@ class Ur5EndoFlexNode(Node):
         self.declare_parameter('flex_TENDON_R', FLEX_TENDON_R)
 
         # Continuous-control velocity limits
-        self.declare_parameter('arm_linear_vel_m_s', 0.050)
-        self.declare_parameter('arm_axis_vel_m_s', 0.050)
-        self.declare_parameter('arm_tilt_vel_deg_s', 30.0)
-        self.declare_parameter('flex_yaw_vel_rad_s', 0.5)
-        self.declare_parameter('flex_curv_vel_1pm_s', 5.0)
-        self.declare_parameter('control_tick_hz', 20.0)
+        self.declare_parameter('arm_linear_vel_m_s', 0.025)
+        self.declare_parameter('arm_axis_vel_m_s', 0.025)
+        self.declare_parameter('arm_tilt_vel_deg_s', 4.0)
+        self.declare_parameter('flex_yaw_vel_rad_s', 1.0)
+        self.declare_parameter('flex_curv_vel_1pm_s', 10.0)
+        # Arc-length slew rate for semi-automatic flex moves (m/s).
+        self.declare_parameter('flex_arc_vel_m_s', 0.020)
+        self.declare_parameter('control_tick_hz', 30.0)
 
         # Optional: disable the pynput keyboard listener. Used when the
         # node is launched headless alongside the simulation so that the
@@ -224,6 +236,8 @@ class Ur5EndoFlexNode(Node):
             self.get_parameter('flex_yaw_vel_rad_s').value)
         self.flex_curv_vel = float(
             self.get_parameter('flex_curv_vel_1pm_s').value)
+        self.flex_arc_vel = float(
+            self.get_parameter('flex_arc_vel_m_s').value)
         self.tick_hz = float(
             self.get_parameter('control_tick_hz').value)
         self.dt = 1.0 / self.tick_hz
@@ -264,6 +278,11 @@ class Ur5EndoFlexNode(Node):
         # Active two-stage PULL OUT state machine (None when idle).
         self._pull_out_state = None
 
+        # Active speed-limited flex slew target (None when idle).  Set by
+        # semi-automatic commands (HOME, BIRD-EYE VIEW, PULL OUT) so the flex
+        # ramps toward its goal instead of snapping in a single tick.
+        self._flex_slew_target = None
+
         # Target tracking.  All fields below are protected by _state_lock.
         self._track_target = None        # active target key or None
         self._targets_state = {}         # key -> np.array(3,) pos_base
@@ -272,6 +291,7 @@ class Ur5EndoFlexNode(Node):
         self._track_dist_m = None        # camera->target distance (m)
         self._track_aim_deg = None       # camera-axis aim error (deg)
         self._track_zone = None          # last WDLS zone (1/2/3) or None
+        self._track_recover = False      # over-bend recovery phase active
         self._track_status_msg = None    # transient refusal reason for GUI
         self._targets_logged = False     # first targets-state receipt logged
 
@@ -429,15 +449,30 @@ class Ur5EndoFlexNode(Node):
             pull_out_active = self._pull_out_state is not None
             if pull_out_active and any_manual_key:
                 self._pull_out_state = None
+                self._flex_slew_target = None
                 pull_out_active = False
                 self.get_logger().info(
                     'PULL OUT cancelled by manual key input.')
             tracking_active = self._track_target is not None
             if tracking_active and any_manual_key:
-                self._track_target = None
+                self._clear_track_state_unlocked()
+                self._flex_slew_target = None
                 tracking_active = False
                 self.get_logger().info(
                     'TRACKING cancelled by manual key input.')
+            # Manual press-and-hold input always wins over a semi-automatic
+            # flex slew that is still ramping.
+            if any_manual_key and self._flex_slew_target is not None:
+                self._flex_slew_target = None
+                self.get_logger().info(
+                    'FLEX slew cancelled by manual key input.')
+            # The tracking servo owns the flex state while engaged.
+            if tracking_active and self._flex_slew_target is not None:
+                self._flex_slew_target = None
+
+        # Ramp any active semi-automatic flex slew (HOME / BIRD-EYE VIEW /
+        # PULL OUT straightening) toward its target, once per control tick.
+        self._step_flex_slew()
 
         if pull_out_active:
             self._step_pull_out()
@@ -657,6 +692,85 @@ class Ur5EndoFlexNode(Node):
             )
         self._publish_flex_joint_states()
 
+    def _set_flex_slew_target(self, curvature=None, steer_yaw=None,
+                              arc_len=None):
+        """Record the desired flex end state for speed-limited slewing.
+
+        Unspecified components (None) hold their current value so a slew
+        request cannot make an unrelated flex DoF drift.  Must be called with
+        _state_lock held.
+        """
+        self._flex_slew_target = {
+            'curvature': (self.flex_curvature
+                          if curvature is None else float(curvature)),
+            'steer_yaw': (self.flex_steer_yaw
+                          if steer_yaw is None else float(steer_yaw)),
+            'arc_len': (self.flex_arc_len
+                        if arc_len is None else float(arc_len)),
+        }
+
+    def _step_flex_slew(self):
+        """Ramp flex state toward the active slew target at velocity limits.
+
+        Moves flex_curvature, flex_steer_yaw and flex_arc_len by at most
+        flex_curv_vel*dt, flex_yaw_vel*dt and flex_arc_vel*dt respectively,
+        clamping without overshoot, and clears the target once all three
+        components have converged.  No-op when no slew is active.
+        """
+        with self._state_lock:
+            target = self._flex_slew_target
+            if target is None:
+                return
+
+            # Arc length (m) first: the curvature clamp below depends on it.
+            a = self.flex_arc_len
+            a_tgt = min(max(FLEX_ARC_MIN, target['arc_len']), FLEX_ARC_MAX)
+            step_a = self.flex_arc_vel * self.dt
+            if abs(a_tgt - a) <= step_a:
+                a_new = a_tgt
+            else:
+                a_new = a + math.copysign(step_a, a_tgt - a)
+            self.flex_arc_len = min(max(FLEX_ARC_MIN, a_new), FLEX_ARC_MAX)
+
+            # Curvature (1/m), clamped to the current geometric bend limit.
+            c = self.flex_curvature
+            eff = max(1e-6, self.flex_arc_len - FLEX_SEG_LEN)
+            kappa_max = FLEX_MAX_BEND / eff
+            c_tgt = min(max(0.0, target['curvature']), kappa_max)
+            step_c = self.flex_curv_vel * self.dt
+            if abs(c_tgt - c) <= step_c:
+                c_new = c_tgt
+            else:
+                c_new = c + math.copysign(step_c, c_tgt - c)
+            self.flex_curvature = min(max(0.0, c_new), kappa_max)
+
+            # Steering yaw (rad) along the shortest angular path.
+            y = self.flex_steer_yaw
+            y_tgt = target['steer_yaw']
+            d_yaw = ((y_tgt - y + math.pi) % (2.0 * math.pi)) - math.pi
+            step_y = self.flex_yaw_vel * self.dt
+            if abs(d_yaw) <= step_y:
+                y_new = y_tgt
+            else:
+                y_new = y + math.copysign(step_y, d_yaw)
+            self.flex_steer_yaw = (
+                (y_new + math.pi) % (2.0 * math.pi) - math.pi)
+
+            # Clear the target once every component has reached its goal.
+            y_err = ((self.flex_steer_yaw - y_tgt + math.pi)
+                     % (2.0 * math.pi)) - math.pi
+            converged = (
+                abs(self.flex_curvature - c_tgt) <= 1e-6
+                and abs(y_err) <= 1e-6
+                and abs(self.flex_arc_len - a_tgt) <= 1e-6)
+            if converged:
+                self._flex_slew_target = None
+
+    def _flex_is_straight(self):
+        """True when flex curvature is within the straight tolerance (1/m)."""
+        with self._state_lock:
+            return abs(self.flex_curvature) <= FLEX_STRAIGHT_KAPPA_TOL
+
     def _update_auto_horizon_twist_unlocked(self, theta_total):
         """Recompute (flex_base_yaw, flex_ext_yaw) so endo_flex's y-axis is
         always kept on the horizontal plane. Must be called with _state_lock held."""
@@ -726,6 +840,7 @@ class Ur5EndoFlexNode(Node):
     def toggle_arm_mode(self):
         with self._state_lock:
             self._pull_out_state = None
+            self._flex_slew_target = None
             tracking_was_active = self._track_target is not None
             if self.arm_mode == 'linear':
                 self.arm_mode = 'rcm'
@@ -738,8 +853,7 @@ class Ur5EndoFlexNode(Node):
                 self.rcm_ref_depth = None
                 self.get_logger().info('Arm mode -> linear (RCM disabled).')
                 if tracking_was_active:
-                    self._track_target = None
-                    self._track_zone = None
+                    self._clear_track_state_unlocked()
                     self.get_logger().warn(
                         'TRACKING auto-cancelled: RCM mode disabled.')
 
@@ -760,8 +874,7 @@ class Ur5EndoFlexNode(Node):
             self.flex_mode = 'free' if self.flex_mode == 'fixed' else 'fixed'
             mode = self.flex_mode
             if mode != 'fixed' and self._track_target is not None:
-                self._track_target = None
-                self._track_zone = None
+                self._clear_track_state_unlocked()
                 self.get_logger().warn(
                     'TRACKING auto-cancelled: flex mode left fixed.')
         self._publish_flex_joint_states()
@@ -774,9 +887,9 @@ class Ur5EndoFlexNode(Node):
         """HOME: arm to HOME_DEG (with wrist_1 auto-solved); flex straight."""
         with self._state_lock:
             self._pull_out_state = None
-            self.flex_steer_yaw = 0.0
-            self.flex_arc_len = FLEX_ARC_MAX
-            self.flex_curvature = 0.0
+            # Ramp the flex straight instead of snapping in a single tick.
+            self._set_flex_slew_target(
+                curvature=0.0, steer_yaw=0.0, arc_len=FLEX_ARC_MAX)
         self._publish_flex_joint_states()
 
         q_target = np.deg2rad(np.array(HOME_DEG, dtype=float))
@@ -787,9 +900,9 @@ class Ur5EndoFlexNode(Node):
         """RESET: HOME + arm_mode=linear, flex_mode=fixed; clear RCM."""
         with self._state_lock:
             self._pull_out_state = None
+            self._flex_slew_target = None
             tracking_was_active = self._track_target is not None
-            self._track_target = None
-            self._track_zone = None
+            self._clear_track_state_unlocked()
             self.arm_mode = 'linear'
             self.flex_mode = 'fixed'
             self.rcm_enabled = False
@@ -818,8 +931,9 @@ class Ur5EndoFlexNode(Node):
                 target_horizon_deg=BIRD_EYE_HORIZON_DEG,
                 max_bend_rad=FLEX_MAX_BEND,
             )
-            self.flex_steer_yaw = 0.0
-            self.flex_curvature = float(theta_target / eff)
+            # Ramp to the bird-eye bend instead of snapping in one tick.
+            self._set_flex_slew_target(
+                curvature=float(theta_target / eff), steer_yaw=0.0)
 
         self._publish_flex_joint_states()
         self.get_logger().info(
@@ -842,7 +956,7 @@ class Ur5EndoFlexNode(Node):
             ref_axis = (None if self.rcm_ref_axis is None
                         else self.rcm_ref_axis.copy())
             q_now = self.joint_positions.copy()
-            self._track_target = None
+            self._clear_track_state_unlocked()
 
         if not (rcm_on and rcm_pt is not None and ref_axis is not None):
             self.get_logger().warn(
@@ -869,15 +983,16 @@ class Ur5EndoFlexNode(Node):
         tip_from_end = float(np.linalg.norm(p_tip_cur - p_end_cur))
 
         with self._state_lock:
-            # Step (a.1): Immediately straighten endo_flex.
-            self.flex_steer_yaw = 0.0
-            self.flex_curvature = 0.0
+            # Step (a.1): Ramp endo_flex straight via the slew mechanism so
+            # the flex does not snap in a single tick.
+            self._set_flex_slew_target(curvature=0.0, steer_yaw=0.0)
             self._pull_out_state = {
                 'stage': 'align',
                 'axis_cmd': axis_cur.copy(),
                 'd_tip_align': d_tip_align,
                 'tip_from_end': tip_from_end,
                 's_end_cmd': None,
+                'waiting_logged': False,
             }
 
         self._publish_flex_joint_states()
@@ -898,13 +1013,13 @@ class Ur5EndoFlexNode(Node):
                     and self.rcm_world_point is not None
                     and self.rcm_ref_axis is not None):
                 self._pull_out_state = None
+                self._flex_slew_target = None
                 return
             rcm_pt = self.rcm_world_point.copy()
             ref_axis = self.rcm_ref_axis.copy()
             q_now = self.joint_positions.copy()
-            # Keep flex straight throughout pull-out.
-            self.flex_steer_yaw = 0.0
-            self.flex_curvature = 0.0
+            # Keep flex straight throughout pull-out (speed-limited slew).
+            self._set_flex_slew_target(curvature=0.0, steer_yaw=0.0)
 
         try:
             axis_cur, _, p_tip_cur = self.kin.tube_axis_in_base(q_now)
@@ -913,10 +1028,14 @@ class Ur5EndoFlexNode(Node):
             self.get_logger().warn(f'PULL OUT FK failed: {e}')
             with self._state_lock:
                 self._pull_out_state = None
+                self._flex_slew_target = None
             return
 
         # ---------------- Stage (a): Align direction to ref_axis ----------------
         if st['stage'] == 'align':
+            # Rotation/alignment and flex straightening run concurrently.
+            # Always perform this tick's alignment work first, then decide
+            # whether the transition to retraction is allowed.
             axis_cmd = st['axis_cmd']
             cos_cmd = float(np.clip(np.dot(axis_cmd, ref_axis), -1.0, 1.0))
             err_cmd = math.acos(cos_cmd)
@@ -941,16 +1060,33 @@ class Ur5EndoFlexNode(Node):
                 q_target = self._auto_solve_wrist1(q_target)
                 self._send_trajectory(q_target, traj_duration=self.dt)
 
-            # Check actual alignment with ref_axis to transition to Stage (b)
+            # Check actual alignment with ref_axis to transition to Stage (b).
             cos_actual = float(np.clip(np.dot(axis_cur, ref_axis), -1.0, 1.0))
             err_actual_deg = math.degrees(math.acos(cos_actual))
-            if np.allclose(axis_next, ref_axis, atol=1e-3) and err_actual_deg < 1.0:
-                s_end_cur = float(np.dot(p_end_cur - rcm_pt, ref_axis))
-                st['stage'] = 'retract'
-                st['s_end_cmd'] = s_end_cur
-                self.get_logger().info(
-                    f'PULL OUT Stage (a) aligned (err={err_actual_deg:.2f} deg). '
-                    f'Stage (b) retracting along fixed central axis to 10 cm behind RCM.')
+            aligned = (np.allclose(axis_next, ref_axis, atol=1e-3)
+                       and err_actual_deg < 1.0)
+            if not aligned:
+                return
+
+            # Gate only the backward retraction: the arm must not start
+            # pulling out until the flex is fully straightened.  Alignment
+            # keeps running above while the flex slew converges.
+            if not self._flex_is_straight():
+                if not st.get('waiting_logged', False):
+                    self.get_logger().info(
+                        'PULL OUT Stage (a): direction aligned; waiting for '
+                        'flex to finish straightening before retraction.')
+                    st['waiting_logged'] = True
+                return
+
+            # Gate passed: re-arm the one-shot wait log for any later gate.
+            st['waiting_logged'] = False
+            s_end_cur = float(np.dot(p_end_cur - rcm_pt, ref_axis))
+            st['stage'] = 'retract'
+            st['s_end_cmd'] = s_end_cur
+            self.get_logger().info(
+                f'PULL OUT Stage (a) aligned (err={err_actual_deg:.2f} deg). '
+                f'Stage (b) retracting along fixed central axis to 10 cm behind RCM.')
             return
 
         # ---------------- Stage (b): Retract along ref_axis ----------------
@@ -979,6 +1115,7 @@ class Ur5EndoFlexNode(Node):
                     and s_end_cur >= PULL_OUT_BEHIND_RCM_M - 0.003):
                 with self._state_lock:
                     self._pull_out_state = None
+                    self._flex_slew_target = None
                 self.get_logger().info(
                     f'PULL OUT complete: endo_flex end is '
                     f'{s_end_cur * 100.0:.1f} cm behind fixed RCM point.')
@@ -986,6 +1123,21 @@ class Ur5EndoFlexNode(Node):
     # ==================================================================
     # Target tracking (hybrid flex-primary RCM servo, one tick per call)
     # ==================================================================
+    def _clear_track_state_unlocked(self):
+        """Reset all per-task tracking state (must hold _state_lock).
+
+        Clears every field a new task must not inherit from a stopped or
+        auto-cancelled task, so stale flags cannot block the next task.
+        """
+        self._track_target = None
+        self._track_zone = None
+        self._track_warned = False
+        self._track_locked = False
+        self._track_recover = False
+        self._track_dist_m = None
+        self._track_aim_deg = None
+        self._track_status_msg = None
+
     def start_tracking(self, key):
         """Engage closed-loop hybrid RCM tracking of a scene target by key.
 
@@ -998,6 +1150,8 @@ class Ur5EndoFlexNode(Node):
             return
 
         refusal = None
+        recovering = False
+        start_theta_deg = 0.0
         with self._state_lock:
             rcm_ok = (self.arm_mode == 'rcm' and self.rcm_enabled
                       and self.rcm_world_point is not None)
@@ -1006,13 +1160,16 @@ class Ur5EndoFlexNode(Node):
                 self._track_status_msg = refusal
             else:
                 self._pull_out_state = None
+                self._flex_slew_target = None
+                # Drop every flag from any previous task before installing
+                # this task, so a cancelled task cannot leave stale state.
+                self._clear_track_state_unlocked()
                 self._track_target = key
-                self._track_locked = False
-                self._track_warned = False
-                self._track_dist_m = None
-                self._track_aim_deg = None
-                self._track_zone = None
-                self._track_status_msg = None
+                start_theta_deg = math.degrees(min(
+                    FLEX_MAX_BEND, TRACK_L_EFF * self.flex_curvature))
+                self._track_recover = (
+                    start_theta_deg > TRACK_RECOVER_BEND_DEG)
+                recovering = self._track_recover
                 has_state = bool(self._targets_state)
 
         if refusal is not None:
@@ -1020,6 +1177,11 @@ class Ur5EndoFlexNode(Node):
                 f'TRACKING refused for {key}: {refusal}.')
             return
 
+        if recovering:
+            self.get_logger().info(
+                f'TRACKING recovery: flex bend {start_theta_deg:.1f} deg > '
+                f'{TRACK_RECOVER_BEND_DEG:.0f} deg; unbending flex before '
+                f'servo engagement (arm held still).')
         self.get_logger().info(
             f'TRACKING started: {key} '
             f'(standoff {self.tracking_standoff * 100.0:.1f} cm)')
@@ -1032,8 +1194,7 @@ class Ur5EndoFlexNode(Node):
         with self._state_lock:
             if self._track_target is None:
                 return
-            self._track_target = None
-            self._track_zone = None
+            self._clear_track_state_unlocked()
         self.get_logger().info('TRACKING stopped; holding current state.')
 
     @staticmethod
@@ -1078,6 +1239,7 @@ class Ur5EndoFlexNode(Node):
             flex_mode = self.flex_mode
             standoff = float(self.tracking_standoff)
             already_warned = self._track_warned
+            recovering = bool(self._track_recover)
             if p_target is None and not already_warned:
                 self._track_warned = True
 
@@ -1085,15 +1247,13 @@ class Ur5EndoFlexNode(Node):
         if not (arm_mode == 'rcm' and rcm_on and rcm_pt is not None
                 and ref_axis is not None):
             with self._state_lock:
-                self._track_target = None
-                self._track_zone = None
+                self._clear_track_state_unlocked()
             self.get_logger().warn(
                 'TRACKING auto-cancelled: RCM mode is no longer active.')
             return
         if flex_mode != 'fixed':
             with self._state_lock:
-                self._track_target = None
-                self._track_zone = None
+                self._clear_track_state_unlocked()
             self.get_logger().warn(
                 'TRACKING auto-cancelled: flex mode is no longer fixed.')
             return
@@ -1136,6 +1296,15 @@ class Ur5EndoFlexNode(Node):
         # ---- Zone schedule on the current flex bend ----
         theta_total = min(FLEX_MAX_BEND, TRACK_L_EFF * kappa)
         theta_deg = math.degrees(theta_total)
+        # Over-bend recovery ends once the flex is back inside the
+        # flex-primary range (50 deg), giving 5 deg of hysteresis.
+        if recovering and theta_deg <= TRACK_RECOVER_DONE_DEG:
+            with self._state_lock:
+                self._track_recover = False
+            recovering = False
+            self.get_logger().info(
+                f'TRACKING recovery complete: flex bend {theta_deg:.1f} deg '
+                f'<= {TRACK_RECOVER_DONE_DEG:.0f} deg; resuming hybrid servo.')
         if theta_deg <= 50.0:
             zone = 1
             w_rel = np.array([1.0, 1.0, 1e6, 1e6, 1.0])
@@ -1154,76 +1323,92 @@ class Ur5EndoFlexNode(Node):
         max_dtilt = self.arm_tilt_vel * self.dt
         max_dins = self.arm_axis_vel * self.dt
 
-        # ---- WDLS primary solve ----
-        if err_norm < 1e-12:
-            du = np.zeros(5, dtype=float)
+        # ---- Flex/arm step: over-bend recovery or normal hybrid WDLS ----
+        if recovering:
+            # Over-bend recovery: unwind the flex at its full rate with the
+            # arm held still.  This guarantees inward (reducing) curvature
+            # regardless of the zone weights or the zone-3 outward lock, and
+            # avoids a compensating arm lunge while the bend recovers.
+            d_kappa = -max_dkappa
+            d_psi = 0.0
+            d_tilt = 0.0
+            d_yaw = 0.0
+            d_ins_step = 0.0
         else:
-            try:
-                J = self.kin.hybrid_rcm_jacobian(
-                    rcm_pt, R_shaft, d_ins, kappa, steer_yaw, standoff,
-                    arc_len=arc_len, flex_mode=flex_mode,
-                    tip_to_flex_base=TRACK_TIP_TO_FLEX_BASE)
-            except Exception as e:
-                self.get_logger().warn(
-                    f'TRACKING Jacobian failed: {e}',
-                    throttle_duration_sec=2.0)
-                return
-            du = self._wdls_solve(J, e_vec, w_rel)
-            if du is None:
-                self.get_logger().warn(
-                    'TRACKING WDLS singular; skipping tick.',
-                    throttle_duration_sec=2.0)
-                return
+            # ---- WDLS primary solve ----
+            if err_norm < 1e-12:
+                du = np.zeros(5, dtype=float)
+            else:
+                try:
+                    J = self.kin.hybrid_rcm_jacobian(
+                        rcm_pt, R_shaft, d_ins, kappa, steer_yaw, standoff,
+                        arc_len=arc_len, flex_mode=flex_mode,
+                        tip_to_flex_base=TRACK_TIP_TO_FLEX_BASE)
+                except Exception as e:
+                    self.get_logger().warn(
+                        f'TRACKING Jacobian failed: {e}',
+                        throttle_duration_sec=2.0)
+                    return
+                du = self._wdls_solve(J, e_vec, w_rel)
+                if du is None:
+                    self.get_logger().warn(
+                        'TRACKING WDLS singular; skipping tick.',
+                        throttle_duration_sec=2.0)
+                    return
 
-            # Zone 3: lock outward bending (inward unbending stays flex-first).
-            if zone == 3:
-                kx0 = kappa * math.cos(steer_yaw)
-                ky0 = kappa * math.sin(steer_yaw)
-                kappa_solved = math.hypot(kx0 + du[0], ky0 + du[1])
-                if kappa_solved > kappa + 1e-12:
-                    w_lock = w_rel.copy()
-                    w_lock[0] = 1e4
-                    w_lock[1] = 1e4
-                    du_lock = self._wdls_solve(J, e_vec, w_lock)
-                    if du_lock is None:
-                        self.get_logger().warn(
-                            'TRACKING WDLS singular (outward lock); '
-                            'skipping tick.', throttle_duration_sec=2.0)
-                        return
-                    du = du_lock
+                # Zone 3: lock outward bending.  This re-solve is only
+                # entered when the primary step would increase curvature, so
+                # inward (reducing) curvature is never blocked.
+                if zone == 3:
+                    kx0 = kappa * math.cos(steer_yaw)
+                    ky0 = kappa * math.sin(steer_yaw)
+                    kappa_solved = math.hypot(kx0 + du[0], ky0 + du[1])
+                    if kappa_solved > kappa + 1e-12:
+                        w_lock = w_rel.copy()
+                        w_lock[0] = 1e4
+                        w_lock[1] = 1e4
+                        du_lock = self._wdls_solve(J, e_vec, w_lock)
+                        if du_lock is None:
+                            self.get_logger().warn(
+                                'TRACKING WDLS singular (outward lock); '
+                                'skipping tick.', throttle_duration_sec=2.0)
+                            return
+                        du = du_lock
 
-            # ---- Null-space recentering above 55 deg (low gain) ----
-            if theta_total > math.radians(55.0) and kappa > 1e-9:
-                J_pinv = np.linalg.pinv(J)
-                N_null = np.eye(5) - J_pinv @ J
-                g = np.zeros(5, dtype=float)
-                g_flex = -TRACK_L_EFF * (theta_total - math.radians(45.0))
-                g[0] = g_flex * math.cos(steer_yaw)
-                g[1] = g_flex * math.sin(steer_yaw)
-                du = du - 0.1 * (N_null @ g)
+                # ---- Null-space recentering above 55 deg (low gain) ----
+                if theta_total > math.radians(55.0) and kappa > 1e-9:
+                    J_pinv = np.linalg.pinv(J)
+                    N_null = np.eye(5) - J_pinv @ J
+                    g = np.zeros(5, dtype=float)
+                    g_flex = -TRACK_L_EFF * (theta_total - math.radians(45.0))
+                    g[0] = g_flex * math.cos(steer_yaw)
+                    g[1] = g_flex * math.sin(steer_yaw)
+                    du = du - 0.1 * (N_null @ g)
 
-        # ---- Hard clamps ----
-        kx0 = kappa * math.cos(steer_yaw)
-        ky0 = kappa * math.sin(steer_yaw)
-        kappa_u = math.hypot(kx0 + du[0], ky0 + du[1])
-        if kappa_u > 1e-12:
-            psi_u = math.atan2(ky0 + du[1], kx0 + du[0])
-        else:
-            psi_u = steer_yaw
-        d_kappa = float(np.clip(kappa_u - kappa, -max_dkappa, max_dkappa))
-        d_psi = float(np.clip(
-            (psi_u - steer_yaw + math.pi) % (2.0 * math.pi) - math.pi,
-            -max_dpsi, max_dpsi))
+            # ---- Hard clamps ----
+            kx0 = kappa * math.cos(steer_yaw)
+            ky0 = kappa * math.sin(steer_yaw)
+            kappa_u = math.hypot(kx0 + du[0], ky0 + du[1])
+            if kappa_u > 1e-12:
+                psi_u = math.atan2(ky0 + du[1], kx0 + du[0])
+            else:
+                psi_u = steer_yaw
+            d_kappa = float(np.clip(
+                kappa_u - kappa, -max_dkappa, max_dkappa))
+            d_psi = float(np.clip(
+                (psi_u - steer_yaw + math.pi) % (2.0 * math.pi) - math.pi,
+                -max_dpsi, max_dpsi))
+            d_tilt = float(np.clip(du[2], -max_dtilt, max_dtilt))
+            d_yaw = float(np.clip(du[3], -max_dtilt, max_dtilt))
+            d_ins_step = float(np.clip(du[4], -max_dins, max_dins))
+
+        # ---- Common flex target (also enforces the global bend clamp) ----
         kappa_new = float(np.clip(
             kappa + d_kappa, 0.0, FLEX_MAX_BEND / TRACK_L_EFF))
         if kappa_new < 1e-6:
             psi_new = steer_yaw
         else:
             psi_new = (steer_yaw + d_psi + math.pi) % (2.0 * math.pi) - math.pi
-
-        d_tilt = float(np.clip(du[2], -max_dtilt, max_dtilt))
-        d_yaw = float(np.clip(du[3], -max_dtilt, max_dtilt))
-        d_ins_step = float(np.clip(du[4], -max_dins, max_dins))
 
         # ---- RCM cone guard: freeze the arm, keep the flex moving ----
         R_shaft_new = self.kin.rotate_shaft_frame(
@@ -1262,7 +1447,10 @@ class Ur5EndoFlexNode(Node):
                 self._send_trajectory(q_target, traj_duration=self.dt)
 
         # ---- GUI / marker telemetry ----
-        locked = (aim_deg < 0.5 and abs(dist_m - standoff) < 0.0015)
+        # Do not report "locked" while the flex is still in over-bend
+        # recovery; the arm is intentionally held and the aim is transient.
+        locked = (not recovering and aim_deg < 0.5
+                  and abs(dist_m - standoff) < 0.0015)
         with self._state_lock:
             self._track_dist_m = dist_m
             self._track_aim_deg = aim_deg
@@ -1714,6 +1902,7 @@ class Ur5EndoFlexNode(Node):
                 'tracking_dist_m': self._track_dist_m,
                 'tracking_aim_deg': self._track_aim_deg,
                 'tracking_zone': self._track_zone,
+                'tracking_recovering': self._track_recover,
                 'tracking_locked': self._track_locked,
                 'tracking_refusal': self._track_status_msg,
             }
